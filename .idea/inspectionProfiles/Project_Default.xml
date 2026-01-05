@@ -1,0 +1,184 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="CssUnknownProperty" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="myCustomPropertiesEnabled" value="true" />
+      <option name="myIgnoreVendorSpecificProperties" value="false" />
+      <option name="myCustomPropertiesList">
+        <value>
+          <list size="1">
+            <item index="0" class="java.lang.String" itemvalue="mergin-bottom" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="DuplicatedCode" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <Languages>
+        <language minSize="65" name="Python" />
+      </Languages>
+    </inspection_tool>
+    <inspection_tool class="EmptyTryBlockJS" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="Eslint" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="HtmlUnknownAttribute" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="myValues">
+        <value>
+          <list size="20">
+            <item index="0" class="java.lang.String" itemvalue="hx-post" />
+            <item index="1" class="java.lang.String" itemvalue="hx-target" />
+            <item index="2" class="java.lang.String" itemvalue="hx-swap" />
+            <item index="3" class="java.lang.String" itemvalue="hx-confirm" />
+            <item index="4" class="java.lang.String" itemvalue="nunjucks-template" />
+            <item index="5" class="java.lang.String" itemvalue="hx-ext" />
+            <item index="6" class="java.lang.String" itemvalue="hx-headers" />
+            <item index="7" class="java.lang.String" itemvalue="hx-get" />
+            <item index="8" class="java.lang.String" itemvalue="hx-trigger" />
+            <item index="9" class="java.lang.String" itemvalue="hx-include" />
+            <item index="10" class="java.lang.String" itemvalue="hx-indicator" />
+            <item index="11" class="java.lang.String" itemvalue="hx-disabled-elt" />
+            <item index="12" class="java.lang.String" itemvalue="hx-prompt" />
+            <item index="13" class="java.lang.String" itemvalue="hx-disable" />
+            <item index="14" class="java.lang.String" itemvalue="hx-put" />
+            <item index="15" class="java.lang.String" itemvalue="preload" />
+            <item index="16" class="java.lang.String" itemvalue="x-data" />
+            <item index="17" class="java.lang.String" itemvalue="x-ref" />
+            <item index="18" class="java.lang.String" itemvalue="x-init" />
+            <item index="19" class="java.lang.String" itemvalue="x-on:keydown.window" />
+          </list>
+        </value>
+      </option>
+      <option name="myCustomValuesEnabled" value="true" />
+    </inspection_tool>
+    <inspection_tool class="PyAugmentAssignmentInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyClassicStyleClassInspection" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyCompatibilityInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ourVersions">
+        <value>
+          <list size="4">
+            <item index="0" class="java.lang.String" itemvalue="3.11" />
+            <item index="1" class="java.lang.String" itemvalue="3.11" />
+            <item index="2" class="java.lang.String" itemvalue="3.12" />
+            <item index="3" class="java.lang.String" itemvalue="3.13" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyInterpreterInspection" enabled="false" level="WARNING" enabled_by_default="false" />
+    <inspection_tool class="PyMissingTypeHintsInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="amqp" />
+          <option value="annotated-types" />
+          <option value="anyio" />
+          <option value="asgiref" />
+          <option value="attrs" />
+          <option value="beautifulsoup4" />
+          <option value="billiard" />
+          <option value="boto3" />
+          <option value="botocore" />
+          <option value="celery" />
+          <option value="certifi" />
+          <option value="charset-normalizer" />
+          <option value="click" />
+          <option value="click-didyoumean" />
+          <option value="click-plugins" />
+          <option value="click-repl" />
+          <option value="colorama" />
+          <option value="cryptography" />
+          <option value="dataclasses-json" />
+          <option value="distro" />
+          <option value="django" />
+          <option value="django-auditlog" />
+          <option value="django-browser-reload" />
+          <option value="django-components" />
+          <option value="django-environ" />
+          <option value="django-extensions" />
+          <option value="django-health-check" />
+          <option value="django-htmx" />
+          <option value="django-storages" />
+          <option value="django-valkey" />
+          <option value="djc-core-html-parser" />
+          <option value="freezegun" />
+          <option value="griffe" />
+          <option value="gunicorn" />
+          <option value="h11" />
+          <option value="httpcore" />
+          <option value="httpx" />
+          <option value="httpx-sse" />
+          <option value="idna" />
+          <option value="iniconfig" />
+          <option value="jinja2" />
+          <option value="jiter" />
+          <option value="jmespath" />
+          <option value="jsonschema" />
+          <option value="jsonschema-specifications" />
+          <option value="kombu" />
+          <option value="markupsafe" />
+          <option value="marshmallow" />
+          <option value="mcp" />
+          <option value="moto" />
+          <option value="mypy-extensions" />
+          <option value="openai" />
+          <option value="openai-agents" />
+          <option value="packaging" />
+          <option value="pluggy" />
+          <option value="prompt-toolkit" />
+          <option value="psutil" />
+          <option value="psycopg" />
+          <option value="py-partiql-parser" />
+          <option value="pydantic" />
+          <option value="pydantic-core" />
+          <option value="pydantic-settings" />
+          <option value="pygments" />
+          <option value="pytest" />
+          <option value="pytest-django" />
+          <option value="python-dateutil" />
+          <option value="python-dotenv" />
+          <option value="python-multipart" />
+          <option value="pyyaml" />
+          <option value="redis" />
+          <option value="referencing" />
+          <option value="requests" />
+          <option value="responses" />
+          <option value="rpds-py" />
+          <option value="s3transfer" />
+          <option value="six" />
+          <option value="sniffio" />
+          <option value="soupsieve" />
+          <option value="sqlparse" />
+          <option value="sse-starlette" />
+          <option value="starlette" />
+          <option value="tqdm" />
+          <option value="types-requests" />
+          <option value="typing-extensions" />
+          <option value="typing-inspect" />
+          <option value="typing-inspection" />
+          <option value="tzdata" />
+          <option value="urllib3" />
+          <option value="valkey" />
+          <option value="vine" />
+          <option value="wcwidth" />
+          <option value="werkzeug" />
+          <option value="xmltodict" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPep8Inspection" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <option name="ignoredErrors">
+        <list>
+          <option value="E203" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPep8NamingInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <option name="ignoredErrors">
+        <list>
+          <option value="N811" />
+          <option value="N806" />
+          <option value="N801" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="TsLint" enabled="true" level="WARNING" enabled_by_default="true" />
+  </profile>
+</component>
