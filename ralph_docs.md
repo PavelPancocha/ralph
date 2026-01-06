@@ -96,8 +96,8 @@ Only then Ralph writes:
 * **Magic phrase**:
   `I AM HYPER SURE I AM DONE!`
 
-* **Max attempts per spec** (implementation retries):
-  `50`
+* **Max attempts per spec** (any failure counts: impl or verify):
+  `10`
 
 * **Codex args default** (YOLO + skip git check):
 

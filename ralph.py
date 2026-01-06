@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import shutil
@@ -63,7 +64,7 @@ from typing import Any, Iterable
 # -----------------------------
 
 DEFAULT_MAGIC_PHRASE = "I AM HYPER SURE I AM DONE!"
-DEFAULT_MAX_ATTEMPTS = 50
+DEFAULT_MAX_ATTEMPTS = 10
 
 # YOLO + skip git check by default
 DEFAULT_CODEX_ARGS = (
@@ -109,6 +110,7 @@ class Config:
     json_logs: bool
     skip_validation: bool
     force_specs: set[str]  # rel path from specs_root (e.g. "area/0002-bar.md")
+    color_output: bool
 
 
 @dataclass(frozen=True)
@@ -255,6 +257,39 @@ def _parse_bool_flag(value: str | None) -> bool:
     if value is None:
         return True
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+ANSI_RESET = "\x1b[0m"
+ANSI_COLORS = {
+    "red": "\x1b[31m",
+    "green": "\x1b[32m",
+    "yellow": "\x1b[33m",
+    "blue": "\x1b[34m",
+    "cyan": "\x1b[36m",
+    "gray": "\x1b[90m",
+}
+
+
+def should_use_color(no_color: bool) -> bool:
+    if no_color:
+        return False
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    return sys.stdout.isatty()
+
+
+def colorize(text: str, color: str | None, enabled: bool) -> str:
+    if not enabled or not color:
+        return text
+    code = ANSI_COLORS.get(color)
+    if not code:
+        return text
+    return f"{code}{text}{ANSI_RESET}"
+
+
+def print_status(label: str, message: str, *, color: str | None, enabled: bool) -> None:
+    prefix = colorize(f"[{label}]", color, enabled)
+    print(f"{prefix} {message}")
 
 
 def _supports_flag(codex_exe: str, flag: str, *, subcommand: str | None = None) -> bool:
@@ -690,6 +725,20 @@ def output_tail(text: str, max_lines: int = 200) -> str:
     return "\n".join(lines[-max_lines:])
 
 
+def summarize_output(output_text: str, max_last_len: int = 160) -> dict[str, Any]:
+    lines = output_text.splitlines()
+    non_empty = [ln.strip() for ln in lines if ln.strip()]
+    last_non_empty = non_empty[-1] if non_empty else None
+    if last_non_empty and len(last_non_empty) > max_last_len:
+        last_non_empty = last_non_empty[:max_last_len] + "..."
+    return {
+        "output_lines": len(lines),
+        "output_chars": len(output_text),
+        "output_nonempty_lines": len(non_empty),
+        "output_last_nonempty": last_non_empty,
+    }
+
+
 # -----------------------------
 
 # Core pipeline: candidate -> verify -> done
@@ -716,6 +765,7 @@ def verify_candidate(
     config: Config,
     logger: Logger,
     candidate: CandidateInfo,
+    attempt: int,
 ) -> tuple[bool, str]:
     """
     Returns (verified, verifier_output_text).
@@ -734,6 +784,7 @@ def verify_candidate(
         "verify_start",
         spec=spec.rel_from_specs,
         candidate_commit=candidate.candidate_commit,
+        attempt=attempt,
         run_dir=to_rel_posix(verify_run_dir, paths.ralph_home),
     )
 
@@ -748,27 +799,45 @@ def verify_candidate(
     except Exception:
         err = traceback.format_exc()
         write_run_log(verify_run_dir, "verify-exception.log", err)
-        logger.log("verify_exception", spec=spec.rel_from_specs, error=err)
+        logger.log("verify_exception", spec=spec.rel_from_specs, attempt=attempt, error=err)
         return False, "[exception]\n" + err
 
     write_run_log(verify_run_dir, "verify.log", res.output_text)
+    summary = summarize_output(res.output_text)
+    ok, commit = completion_tuple(res.output_text, config.magic_phrase)
+    commit_match = ok and commit == candidate.candidate_commit
+    logger.log(
+        "verify_run_complete",
+        spec=spec.rel_from_specs,
+        attempt=attempt,
+        exit_code=res.exit_code,
+        completion_ok=ok,
+        completion_commit=commit,
+        commit_match=commit_match,
+        run_dir=to_rel_posix(verify_run_dir, paths.ralph_home),
+        **summary,
+    )
 
     if looks_like_usage_limit(res.output_text):
         reset = parse_reset_seconds(res.output_text)
         if reset is not None:
             wait_s = reset + 30
-            logger.log("usage_limit_wait", phase="verify", spec=spec.rel_from_specs, wait_seconds=wait_s)
-            print(f"[wait] usage limit reached during verify; sleeping {wait_s}s before retry")
+            logger.log("usage_limit_wait", phase="verify", spec=spec.rel_from_specs, attempt=attempt, wait_seconds=wait_s)
+            print_status(
+                "wait",
+                f"usage limit reached during verify; sleeping {wait_s}s before retry",
+                color="yellow",
+                enabled=config.color_output,
+            )
             time.sleep(wait_s)
             return False, res.output_text
         raise RuntimeError("Codex usage limit reached during verify (could not parse reset time).")
 
     if res.exit_code != 0:
-        logger.log("verify_nonzero_exit", spec=spec.rel_from_specs, exit_code=res.exit_code)
+        logger.log("verify_nonzero_exit", spec=spec.rel_from_specs, attempt=attempt, exit_code=res.exit_code)
         return False, res.output_text
 
-    ok, commit = completion_tuple(res.output_text, config.magic_phrase)
-    if ok and commit == candidate.candidate_commit:
+    if commit_match:
         # update candidate with verify run info
         updated = CandidateInfo(
             spec_rel=candidate.spec_rel,
@@ -804,6 +873,8 @@ def verify_candidate(
         "verify_fail",
         spec=spec.rel_from_specs,
         candidate_commit=candidate.candidate_commit,
+        attempt=attempt,
+        observed_commit=commit,
         reason="completion_contract_not_satisfied_or_commit_mismatch",
     )
     return False, res.output_text
@@ -825,14 +896,15 @@ def run_spec_pipeline(
     """
     rel = spec.rel_from_specs
     forced = rel in config.force_specs
+    logger.log("spec_start", spec=rel, forced=forced, already_done=rel in done_set, dry_run=config.dry_run)
 
     if rel in done_set and not forced:
-        print(f"[skip] already done: {rel}")
+        print_status("skip", f"already done: {rel}", color="gray", enabled=config.color_output)
         logger.log("spec_skipped", spec=rel)
         return SpecResult.SKIPPED
 
     if config.dry_run:
-        print(f"[dry-run] would run: {rel}")
+        print_status("dry-run", f"would run: {rel}", color="yellow", enabled=config.color_output)
         logger.log("spec_dry_run", spec=rel)
         return SpecResult.DRY_RUN
 
@@ -840,24 +912,62 @@ def run_spec_pipeline(
 
     # If there is a candidate already (e.g. from previous interrupted run), try verify first.
     candidate = load_candidate(paths, rel)
-    if candidate and not forced and candidate.status != "verified":
-        print(f"[pending] candidate exists for {rel} @ {candidate.candidate_commit[:8]}... - verifying")
-        verified, vout = verify_candidate(
-            spec=spec,
-            paths=paths,
-            config=config,
-            logger=logger,
-            candidate=candidate,
-        )
-        if verified:
-            done_set.add(rel)
-            print(f"[done] {rel} (verified commit: {candidate.candidate_commit[:8]})")
-            return SpecResult.COMPLETED
-        verifier_feedback = output_tail(vout)
 
     attempt = 1
     while attempt <= config.max_attempts:
-        print(f"[start] {rel} | implement attempt {attempt}/{config.max_attempts}")
+        if candidate and not forced and candidate.status != "verified":
+            logger.log(
+                "candidate_loaded",
+                spec=rel,
+                candidate_commit=candidate.candidate_commit,
+                status=candidate.status,
+                last_impl_run_dir=candidate.last_impl_run_dir,
+                last_verify_run_dir=candidate.last_verify_run_dir,
+                attempt=attempt,
+            )
+            print_status(
+                "pending",
+                f"candidate exists for {rel} @ {candidate.candidate_commit[:8]}... - verifying",
+                color="cyan",
+                enabled=config.color_output,
+            )
+            verified, vout = verify_candidate(
+                spec=spec,
+                paths=paths,
+                config=config,
+                logger=logger,
+                candidate=candidate,
+                attempt=attempt,
+            )
+            if verified:
+                done_set.add(rel)
+                print_status(
+                    "done",
+                    f"{rel} (verified commit: {candidate.candidate_commit[:8]})",
+                    color="green",
+                    enabled=config.color_output,
+                )
+                return SpecResult.COMPLETED
+            verifier_feedback = output_tail(vout)
+            candidate = None
+            delay = backoff_delay(attempt)
+            logger.log("backoff_wait", phase="verify", spec=rel, attempt=attempt, wait_seconds=delay, reason="verify_failed")
+            print_status(
+                "retry",
+                f"verifier failed; backing off {delay:.1f}s before implement attempt",
+                color="yellow",
+                enabled=config.color_output,
+            )
+            time.sleep(delay)
+            attempt += 1
+            continue
+
+        print_status(
+            "start",
+            f"{rel} | implement attempt {attempt}/{config.max_attempts}",
+            color="blue",
+            enabled=config.color_output,
+        )
         logger.log("impl_start", spec=rel, attempt=attempt)
 
         impl_run_dir = make_run_dir(paths, spec.spec_id)
@@ -881,19 +991,42 @@ def run_spec_pipeline(
             write_run_log(impl_run_dir, "impl-exception.log", err)
             logger.log("impl_exception", spec=rel, attempt=attempt, error=err)
             delay = backoff_delay(attempt)
-            print(f"[wait] backing off {delay:.1f}s before retry")
+            logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="exception")
+            print_status(
+                "wait",
+                f"backing off {delay:.1f}s before retry",
+                color="yellow",
+                enabled=config.color_output,
+            )
             time.sleep(delay)
             attempt += 1
             continue
 
         write_run_log(impl_run_dir, f"impl-attempt-{attempt}.log", res.output_text)
+        summary = summarize_output(res.output_text)
+        ok, commit = completion_tuple(res.output_text, config.magic_phrase)
+        logger.log(
+            "impl_run_complete",
+            spec=rel,
+            attempt=attempt,
+            exit_code=res.exit_code,
+            completion_ok=ok,
+            completion_commit=commit,
+            run_dir=to_rel_posix(impl_run_dir, paths.ralph_home),
+            **summary,
+        )
 
         if looks_like_usage_limit(res.output_text):
             reset = parse_reset_seconds(res.output_text)
             if reset is not None:
                 wait_s = reset + 30
                 logger.log("usage_limit_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=wait_s)
-                print(f"[wait] usage limit reached; sleeping {wait_s}s before retry")
+                print_status(
+                    "wait",
+                    f"usage limit reached; sleeping {wait_s}s before retry",
+                    color="yellow",
+                    enabled=config.color_output,
+                )
                 time.sleep(wait_s)
                 attempt += 1
                 continue
@@ -902,16 +1035,27 @@ def run_spec_pipeline(
         if res.exit_code != 0:
             logger.log("impl_nonzero_exit", spec=rel, attempt=attempt, exit_code=res.exit_code)
             delay = backoff_delay(attempt)
-            print(f"[wait] codex exit {res.exit_code}; backing off {delay:.1f}s")
+            logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="nonzero_exit")
+            print_status(
+                "wait",
+                f"codex exit {res.exit_code}; backing off {delay:.1f}s",
+                color="yellow",
+                enabled=config.color_output,
+            )
             time.sleep(delay)
             attempt += 1
             continue
 
-        ok, commit = completion_tuple(res.output_text, config.magic_phrase)
         if not ok or commit is None:
             logger.log("impl_no_completion", spec=rel, attempt=attempt)
             delay = backoff_delay(attempt)
-            print(f"[retry] impl completion contract not satisfied; backing off {delay:.1f}s")
+            logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="no_completion")
+            print_status(
+                "retry",
+                f"impl completion contract not satisfied; backing off {delay:.1f}s",
+                color="yellow",
+                enabled=config.color_output,
+            )
             time.sleep(delay)
             attempt += 1
             continue
@@ -934,30 +1078,54 @@ def run_spec_pipeline(
             candidate_commit=commit,
             candidate_file=to_rel_posix(cpath, paths.ralph_home),
         )
-        print(f"[candidate] {rel} -> {commit[:8]} (saved {to_rel_posix(cpath, paths.ralph_home)})")
+        print_status(
+            "candidate",
+            f"{rel} -> {commit[:8]} (saved {to_rel_posix(cpath, paths.ralph_home)})",
+            color="cyan",
+            enabled=config.color_output,
+        )
 
         # Verify candidate immediately
+        candidate = c
         verified, vout = verify_candidate(
             spec=spec,
             paths=paths,
             config=config,
             logger=logger,
             candidate=c,
+            attempt=attempt,
         )
         if verified:
             done_set.add(rel)
-            print(f"[done] {rel} (verified commit: {commit[:8]})")
+            print_status(
+                "done",
+                f"{rel} (verified commit: {commit[:8]})",
+                color="green",
+                enabled=config.color_output,
+            )
             return SpecResult.COMPLETED
 
         # Not verified: use verifier output tail as feedback for next impl attempt
         verifier_feedback = output_tail(vout)
+        candidate = None
         delay = backoff_delay(attempt)
-        print(f"[retry] verifier failed; backing off {delay:.1f}s before next implement attempt")
+        logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="verify_failed")
+        print_status(
+            "retry",
+            f"verifier failed; backing off {delay:.1f}s before next implement attempt",
+            color="yellow",
+            enabled=config.color_output,
+        )
         time.sleep(delay)
         attempt += 1
 
     logger.log("spec_failed", spec=rel, error="max attempts exceeded")
-    print(f"[failed] max attempts exceeded for {rel}")
+    print_status(
+        "failed",
+        f"max attempts exceeded for {rel}",
+        color="red",
+        enabled=config.color_output,
+    )
     return SpecResult.FAILED
 
 
@@ -987,6 +1155,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stream-agent-output", action="store_true")
     p.add_argument("--json-logs", action="store_true")
     p.add_argument("--skip-validation", action="store_true")
+    p.add_argument("--no-color", action="store_true", help="Disable ANSI colors in console output.")
 
     p.add_argument(
         "--force",
@@ -1029,6 +1198,7 @@ def main() -> int:
         return 1
 
     logger = Logger(paths.runner_log, json_mode=args.json_logs)
+    color_output = should_use_color(args.no_color)
 
     force_specs: set[str] = set()
     if args.force:
@@ -1052,6 +1222,7 @@ def main() -> int:
         json_logs=args.json_logs,
         skip_validation=args.skip_validation,
         force_specs=force_specs,
+        color_output=color_output,
     )
 
     logger.log(
@@ -1065,6 +1236,7 @@ def main() -> int:
         scratchpad=paths.scratchpad.as_posix(),
         magic_phrase=config.magic_phrase,
         max_attempts=config.max_attempts,
+        color_output=config.color_output,
         codex_exe=config.codex_exe,
         codex_args=" ".join(config.codex_args),
         force_specs=sorted(force_specs) if force_specs else None,
@@ -1083,6 +1255,7 @@ def main() -> int:
 
     for i, sp in enumerate(spec_paths, start=1):
         spec = build_spec_info(sp, paths, workspace_root)
+        logger.log("spec_queue", spec=spec.rel_from_specs, index=i, total=len(spec_paths))
         print(f"\n=== [{i}/{len(spec_paths)}] {spec.rel_from_specs} ===")
 
         res = run_spec_pipeline(
@@ -1093,6 +1266,7 @@ def main() -> int:
             done_set=done_set,
         )
         results[res] += 1
+        logger.log("spec_result", spec=spec.rel_from_specs, result=res.value)
 
         if res == SpecResult.FAILED:
             logger.log("run_stopped", reason="spec_failed", failed_spec=spec.rel_from_specs)
