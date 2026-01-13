@@ -1,4 +1,4 @@
-Copyright (C) 2025 Zemtu OG
+Copyright (C) 2026 Zemtu OG
 
 # Ralph Driven Development (RDD) — Candidate → Verify → Done
 
@@ -144,7 +144,7 @@ Specs must be named like:
 
 Only files matching `^\d{4}-.*\.md$` are executed.
 
-### Recommended spec header (strongly suggested)
+### Recommended spec header
 
 Include a clear repo target to avoid ambiguity in multi-repo workspaces:
 
@@ -153,20 +153,45 @@ Include a clear repo target to avoid ambiguity in multi-repo workspaces:
 
 Repo: repo-a
 Workdir: repo-a
-
-## Goal
-...
-
-## Acceptance criteria
-- ...
 ```
 
-### What a spec should contain
+### Recommended structure
 
-* Target repo / directory
-* Concrete acceptance criteria
-* Constraints (e.g., “don’t run full suite”, “prefer targeted tests”)
-* Suggested fast verification commands (optional)
+Use a consistent, deterministic format. Avoid conditional branches in specs.
+
+```md
+## Goal
+
+## Dependencies
+- 0006-previous-spec.md
+
+## Constraints
+- Verification focus: keep code simple, readable, typed; one method/function one responsibility.
+- Any project-specific testing or style rules.
+
+## Required reading
+- <key files to read before coding>
+
+## Acceptance criteria
+- Concrete, testable bullet points.
+
+## Verification (fast-first)
+```bash
+# Targeted tests or commands
+```
+```
+
+### Best practices from current spec creation
+
+* **One spec = one logical PR.** Keep specs small and isolated so verification is fast.
+* **Deterministic steps only.** Avoid “if you find X, then maybe Y” in the spec body.
+* **Required reading helps.** List the key files to read before implementing.
+* **Constraints first.** Put code-quality expectations in Constraints.
+* **Acceptance criteria are measurable.** Tie each change to a test or observable outcome.
+* **Verification is fast-first.** Use targeted tests, then optionally list wider checks.
+* **No prep trackers in specs.** Specs should be runnable on their own.
+* **Sequence dependencies explicitly.** If a spec is a prerequisite, mark it in Dependencies.
+* **Prior implementation references are for context only.** Do not blindly reapply old code.
 
 ---
 
@@ -206,53 +231,6 @@ Rerunning the script is safe:
 
   * If verification passes → it is marked done.
   * If verification fails → Ralph re-runs implementation using verifier feedback.
-
----
-
-## Example Runs
-
-### 1) First run with one spec
-
-```bash
-python ralph/ralph.py
-```
-
-Output sketch:
-
-```
-[start] 0001-seed.md | implement attempt 1/50
-[candidate] -> 7f3c... (saved specs/candidates/0001-seed.json)
-[pending] verifying candidate...
-[done] 0001-seed.md (verified commit: 7f3c...)
-```
-
-Files produced:
-
-* `specs/candidates/0001-seed.json`
-* `specs/done/0001-seed.md`
-* `runs/0001-seed/<timestamp>/...`
-
-### 2) Verification fails → fix loop
-
-```
-[start] 0003-feature.md | implement attempt 1/50
-[candidate] -> aaaa...
-[verify] fails (missing acceptance criteria)
-[start] 0003-feature.md | implement attempt 2/50
-[candidate] -> bbbb...
-[verify] passes
-[done]
-```
-
-Verifier output tail is fed back into the next implementer attempt.
-
-### 3) Interrupt after candidate, resume later
-
-If a run is interrupted after a candidate exists:
-
-* Next run detects `specs/candidates/<spec>.json`
-* Runs **verification only**
-* Marks done if verified
 
 ---
 
