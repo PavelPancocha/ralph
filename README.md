@@ -3,7 +3,7 @@
 **Ralph Driven Development (RDD)** — an autonomous spec-based development runner for AI coding agents.
 
 Ralph orchestrates AI agents (via [Codex](https://github.com/openai/codex)) to implement specs in a controlled, verifiable loop. Each spec goes through implementation and independent verification before being marked complete.
-
+xxxx
 ## How It Works
 
 ```
