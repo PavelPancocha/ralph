@@ -57,6 +57,7 @@ ralph/
 │   ├── 0001-*.md      # Spec files (your backlog)
 │   ├── area/0002-*.md # Nested specs supported
 │   ├── candidates/    # Candidate completion markers (.json)
+│   ├── sessions/      # Saved Codex session ids per spec (.json)
 │   └── done/          # Verified completion markers (.md)
 └── runs/
     └── <spec_id>/<timestamp>/
@@ -120,6 +121,7 @@ Safe to restart at any time:
 - Specs with `done/` marker are skipped
 - Specs with `candidates/` but no `done/` marker → Ralph tries verification first
 - If verification fails → re-runs implementation with verifier feedback
+- Codex sessions are resumed per spec/phase when available; prompts ask the agent to compact context before continuing
 
 ## Defaults
 

@@ -57,7 +57,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, Iterable
+from typing import Any, Final, Iterable, Literal, TypeAlias
 
 
 # -----------------------------
@@ -69,7 +69,7 @@ DEFAULT_MAX_ATTEMPTS: Final[int] = 10
 DEFAULT_USAGE_LIMIT_WAIT_SECONDS: Final[int] = 5
 
 # YOLO + skip git check by default
-DEFAULT_CODEX_ARGS = (
+DEFAULT_CODEX_ARGS: Final[str] = (
     "exec "
     "--dangerously-bypass-approvals-and-sandbox "
     "--skip-git-repo-check"
@@ -87,6 +87,9 @@ class SpecResult(Enum):
     DRY_RUN = "dry_run"
 
 
+SessionPhase: TypeAlias = Literal["impl", "verify"]
+
+
 @dataclass(frozen=True)
 class Paths:
     ralph_home: Path
@@ -96,6 +99,7 @@ class Paths:
     specs_root: Path
     candidates_root: Path
     done_root: Path
+    sessions_root: Path
 
     runner_log: Path
 
@@ -134,6 +138,15 @@ class CandidateInfo:
     status: str  # "candidate" | "verified"
 
 
+@dataclass(frozen=True)
+class SessionInfo:
+    spec_rel: str
+    spec_id: str
+    impl_session_id: str | None
+    verify_session_id: str | None
+    updated_at_utc: str
+
+
 # -----------------------------
 # Logging
 # -----------------------------
@@ -163,10 +176,10 @@ class Logger:
 # Helpers
 # -----------------------------
 
-SPEC_NAME_RE = re.compile(r"^\d{4}-.*\.md$")
-HEADING_RE = re.compile(r"^#{1,6}\s+\S", re.MULTILINE)
+SPEC_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^\d{4}-.*\.md$")
+HEADING_RE: Final[re.Pattern[str]] = re.compile(r"^#{1,6}\s+\S", re.MULTILINE)
 
-USAGE_LIMIT_PATTERNS = (
+USAGE_LIMIT_PATTERNS: Final[tuple[str, ...]] = (
     "usage_limit_reached",
     "You've hit your usage limit",
     "You have hit your usage limit",
@@ -174,10 +187,19 @@ USAGE_LIMIT_PATTERNS = (
     "rate_limit_exceeded",
     "RateLimitError",
 )
-RESET_SECONDS_RE = re.compile(r'resets_in_seconds\\?"\s*:\s*(\d+)')
-RESET_AT_RE = re.compile(r'resets_at\\?"\s*:\s*(\d+)')
+RESET_SECONDS_RE: Final[re.Pattern[str]] = re.compile(r'resets_in_seconds\\?"\s*:\s*(\d+)')
+RESET_AT_RE: Final[re.Pattern[str]] = re.compile(r'resets_at\\?"\s*:\s*(\d+)')
+SESSION_ID_RE: Final[re.Pattern[str]] = re.compile(
+    r"^session id:\s*([0-9a-f-]{36})$",
+    re.IGNORECASE | re.MULTILINE,
+)
+TOKENS_USED_MARKER: Final[str] = "tokens used"
 
-COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+COMMIT_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
+COMPACT_PROMPT_PREFIX: Final[str] = (
+    "Before starting, compact the conversation into a concise internal summary. "
+    "Do not output the summary. Then proceed with the task.\n\n"
+)
 
 
 def utc_stamp() -> str:
@@ -211,7 +233,7 @@ def looks_like_usage_limit(output_text: str) -> bool:
 
 
 def parse_reset_seconds(output_text: str) -> int | None:
-    m = RESET_SECONDS_RE.search(output_text)
+    m: re.Match[str] | None = RESET_SECONDS_RE.search(output_text)
     if m:
         try:
             return int(m.group(1))
@@ -222,11 +244,48 @@ def parse_reset_seconds(output_text: str) -> int | None:
     if not m:
         return None
     try:
-        reset_at = int(m.group(1))
+        reset_at: int = int(m.group(1))
     except Exception:
         return None
-    wait = reset_at - int(time.time())
+    wait: int = reset_at - int(time.time())
     return max(wait, 1)
+
+
+def parse_session_id(output_text: str) -> str | None:
+    match: re.Match[str] | None = SESSION_ID_RE.search(output_text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def parse_tokens_used(output_text: str) -> int | None:
+    lines: list[str] = output_text.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip().lower() != TOKENS_USED_MARKER:
+            continue
+        next_idx: int = idx + 1
+        while next_idx < len(lines) and not lines[next_idx].strip():
+            next_idx += 1
+        if next_idx >= len(lines):
+            return None
+        candidate: str = lines[next_idx].strip()
+        digits: str = re.sub(r"\D", "", candidate)
+        if digits:
+            try:
+                return int(digits)
+            except Exception:
+                return None
+    for line in lines:
+        lowered: str = line.lower()
+        if TOKENS_USED_MARKER not in lowered:
+            continue
+        digits: str = re.sub(r"\D", "", line)
+        if digits:
+            try:
+                return int(digits)
+            except Exception:
+                return None
+    return None
 
 
 def completion_tuple(output_text: str, phrase: str) -> tuple[bool, str | None]:
@@ -261,8 +320,8 @@ def _parse_bool_flag(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-ANSI_RESET = "\x1b[0m"
-ANSI_COLORS = {
+ANSI_RESET: Final[str] = "\x1b[0m"
+ANSI_COLORS: Final[dict[str, str]] = {
     "red": "\x1b[31m",
     "green": "\x1b[32m",
     "yellow": "\x1b[33m",
@@ -364,6 +423,7 @@ def build_paths(ralph_home: Path) -> Paths:
         specs_root=specs_root,
         candidates_root=specs_root / "candidates",
         done_root=specs_root / "done",
+        sessions_root=specs_root / "sessions",
         runner_log=ralph_home / "ralph.log",
     )
 
@@ -376,6 +436,11 @@ def candidate_path_for_spec(paths: Paths, rel_from_specs: str) -> Path:
 def done_path_for_spec(paths: Paths, rel_from_specs: str) -> Path:
     # mirror spec path, keep .md
     return paths.done_root / rel_from_specs
+
+
+def session_path_for_spec(paths: Paths, rel_from_specs: str) -> Path:
+    # mirror spec path, but .json
+    return (paths.sessions_root / rel_from_specs).with_suffix(".json")
 
 
 def is_under_dir(path: Path, parent: Path) -> bool:
@@ -412,7 +477,11 @@ def discover_specs(paths: Paths, validate: bool) -> list[Path]:
     specs: list[Path] = []
     for p in sorted(paths.specs_root.rglob("*.md")):
         # Exclude state dirs under specs/
-        if is_under_dir(p, paths.candidates_root) or is_under_dir(p, paths.done_root):
+        if (
+            is_under_dir(p, paths.candidates_root)
+            or is_under_dir(p, paths.done_root)
+            or is_under_dir(p, paths.sessions_root)
+        ):
             continue
         if p.name in {"README.md", "done.md"}:
             continue
@@ -456,7 +525,7 @@ def load_candidate(paths: Paths, rel_from_specs: str) -> CandidateInfo | None:
     if not cpath.exists():
         return None
     try:
-        raw = json.loads(cpath.read_text(encoding="utf-8"))
+        raw: dict[str, Any] = json.loads(cpath.read_text(encoding="utf-8"))
         return CandidateInfo(
             spec_rel=raw["spec_rel"],
             spec_id=raw["spec_id"],
@@ -474,7 +543,7 @@ def load_candidate(paths: Paths, rel_from_specs: str) -> CandidateInfo | None:
 def save_candidate(paths: Paths, c: CandidateInfo) -> Path:
     cpath = candidate_path_for_spec(paths, c.spec_rel)
     cpath.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "spec_rel": c.spec_rel,
         "spec_id": c.spec_id,
         "candidate_commit": c.candidate_commit,
@@ -485,6 +554,73 @@ def save_candidate(paths: Paths, c: CandidateInfo) -> Path:
     }
     cpath.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return cpath
+
+
+def load_session_info(paths: Paths, rel_from_specs: str) -> SessionInfo | None:
+    spath: Path = session_path_for_spec(paths, rel_from_specs)
+    if not spath.exists():
+        return None
+    try:
+        raw: dict[str, Any] = json.loads(spath.read_text(encoding="utf-8"))
+        return SessionInfo(
+            spec_rel=raw["spec_rel"],
+            spec_id=raw["spec_id"],
+            impl_session_id=raw.get("impl_session_id"),
+            verify_session_id=raw.get("verify_session_id"),
+            updated_at_utc=raw["updated_at_utc"],
+        )
+    except Exception:
+        # Corrupt session file: treat as absent (but keep file for inspection)
+        return None
+
+
+def save_session_info(paths: Paths, info: SessionInfo) -> Path:
+    spath: Path = session_path_for_spec(paths, info.spec_rel)
+    spath.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "spec_rel": info.spec_rel,
+        "spec_id": info.spec_id,
+        "impl_session_id": info.impl_session_id,
+        "verify_session_id": info.verify_session_id,
+        "updated_at_utc": info.updated_at_utc,
+    }
+    spath.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return spath
+
+
+def update_session_info(
+    *,
+    paths: Paths,
+    spec: SpecInfo,
+    phase: SessionPhase,
+    session_id: str,
+) -> SessionInfo:
+    existing: SessionInfo | None = load_session_info(paths, spec.rel_from_specs)
+    impl_session_id: str | None = existing.impl_session_id if existing else None
+    verify_session_id: str | None = existing.verify_session_id if existing else None
+    if phase == "impl":
+        impl_session_id = session_id
+    else:
+        verify_session_id = session_id
+    updated_at_utc: str = datetime.now(timezone.utc).isoformat()
+    info: SessionInfo = SessionInfo(
+        spec_rel=spec.rel_from_specs,
+        spec_id=spec.spec_id,
+        impl_session_id=impl_session_id,
+        verify_session_id=verify_session_id,
+        updated_at_utc=updated_at_utc,
+    )
+    save_session_info(paths, info)
+    return info
+
+
+def get_resume_session_id(paths: Paths, rel_from_specs: str, phase: SessionPhase) -> str | None:
+    info: SessionInfo | None = load_session_info(paths, rel_from_specs)
+    if not info:
+        return None
+    if phase == "impl":
+        return info.impl_session_id
+    return info.verify_session_id
 
 
 def save_done_file(
@@ -660,6 +796,20 @@ class CodexRunResult:
     output_text: str
 
 
+def maybe_compact_prompt(prompt: str, resume_session_id: str | None) -> str:
+    if resume_session_id is None:
+        return prompt
+    return COMPACT_PROMPT_PREFIX + prompt
+
+
+def build_codex_args(codex_args: list[str], resume_session_id: str | None) -> list[str]:
+    if resume_session_id is None:
+        return [*codex_args, "-"]
+    if codex_args and codex_args[0] == "exec":
+        return ["exec", "resume", resume_session_id, *codex_args[1:], "-"]
+    return ["exec", "resume", resume_session_id, *codex_args, "-"]
+
+
 def run_codex(
     *,
     codex_exe: str,
@@ -667,11 +817,12 @@ def run_codex(
     prompt: str,
     workspace_root: Path,
     stream_to_console: bool,
+    resume_session_id: str | None,
 ) -> CodexRunResult:
     cmd: list[str] = [codex_exe]
     if not has_any_flag(codex_args, ["--cd", "-C"]):
         cmd += ["--cd", str(workspace_root)]
-    cmd += [*codex_args, "-"]
+    cmd += build_codex_args(codex_args, resume_session_id)
 
     proc = subprocess.Popen(
         cmd,
@@ -688,7 +839,8 @@ def run_codex(
     assert proc.stdin is not None
     assert proc.stdout is not None
 
-    proc.stdin.write(prompt)
+    prepared_prompt: str = maybe_compact_prompt(prompt, resume_session_id)
+    proc.stdin.write(prepared_prompt)
     proc.stdin.close()
 
     captured: list[str] = []
@@ -721,16 +873,16 @@ def write_run_log(run_dir: Path, filename: str, text: str) -> Path:
 
 
 def output_tail(text: str, max_lines: int = 200) -> str:
-    lines = text.splitlines()
+    lines: list[str] = text.splitlines()
     if len(lines) <= max_lines:
         return text
     return "\n".join(lines[-max_lines:])
 
 
 def summarize_output(output_text: str, max_last_len: int = 160) -> dict[str, Any]:
-    lines = output_text.splitlines()
-    non_empty = [ln.strip() for ln in lines if ln.strip()]
-    last_non_empty = non_empty[-1] if non_empty else None
+    lines: list[str] = output_text.splitlines()
+    non_empty: list[str] = [ln.strip() for ln in lines if ln.strip()]
+    last_non_empty: str | None = non_empty[-1] if non_empty else None
     if last_non_empty and len(last_non_empty) > max_last_len:
         last_non_empty = last_non_empty[:max_last_len] + "..."
     return {
@@ -774,13 +926,14 @@ def verify_candidate(
     Verified is true only if verifier satisfies strict completion contract AND
     repeats the same candidate commit hash.
     """
-    verify_run_dir = make_run_dir(paths, spec.spec_id)
-    verify_prompt = build_verifier_prompt(
+    verify_run_dir: Path = make_run_dir(paths, spec.spec_id)
+    verify_prompt: str = build_verifier_prompt(
         spec=spec,
         paths=paths,
         config=config,
         candidate_commit=candidate.candidate_commit,
     )
+    resume_session_id: str | None = get_resume_session_id(paths, spec.rel_from_specs, "verify")
 
     logger.log(
         "verify_start",
@@ -791,12 +944,13 @@ def verify_candidate(
     )
 
     try:
-        res = run_codex(
+        res: CodexRunResult = run_codex(
             codex_exe=config.codex_exe,
             codex_args=config.codex_args,
             prompt=verify_prompt,
             workspace_root=config.workspace_root,
             stream_to_console=config.stream_output,
+            resume_session_id=resume_session_id,
         )
     except Exception:
         err = traceback.format_exc()
@@ -805,9 +959,15 @@ def verify_candidate(
         return False, "[exception]\n" + err
 
     write_run_log(verify_run_dir, "verify.log", res.output_text)
-    summary = summarize_output(res.output_text)
+    summary: dict[str, Any] = summarize_output(res.output_text)
+    tokens_used: int | None = parse_tokens_used(res.output_text)
+    session_id: str | None = parse_session_id(res.output_text)
+    if session_id is not None:
+        update_session_info(paths=paths, spec=spec, phase="verify", session_id=session_id)
+    ok: bool
+    commit: str | None
     ok, commit = completion_tuple(res.output_text, config.magic_phrase)
-    commit_match = ok and commit == candidate.candidate_commit
+    commit_match: bool = ok and commit == candidate.candidate_commit
     logger.log(
         "verify_run_complete",
         spec=spec.rel_from_specs,
@@ -816,12 +976,18 @@ def verify_candidate(
         completion_ok=ok,
         completion_commit=commit,
         commit_match=commit_match,
+        session_id=session_id,
+        resumed_from_session=resume_session_id,
+        tokens_used=tokens_used,
         run_dir=to_rel_posix(verify_run_dir, paths.ralph_home),
         **summary,
     )
 
     if looks_like_usage_limit(res.output_text):
-        reset = parse_reset_seconds(res.output_text)
+        reset: int | None = parse_reset_seconds(res.output_text)
+        wait_s: int
+        reason: str
+        msg: str
         if reset is not None:
             wait_s = reset + 30
             reason = "reset_seconds"
@@ -904,8 +1070,8 @@ def run_spec_pipeline(
     - If candidate exists and not forced: verify it; if verified mark done; else implement fixes
     - Otherwise: implement -> candidate -> verify -> done
     """
-    rel = spec.rel_from_specs
-    forced = rel in config.force_specs
+    rel: str = spec.rel_from_specs
+    forced: bool = rel in config.force_specs
     logger.log("spec_start", spec=rel, forced=forced, already_done=rel in done_set, dry_run=config.dry_run)
 
     if rel in done_set and not forced:
@@ -921,9 +1087,9 @@ def run_spec_pipeline(
     verifier_feedback: str | None = None
 
     # If there is a candidate already (e.g. from previous interrupted run), try verify first.
-    candidate = load_candidate(paths, rel)
+    candidate: CandidateInfo | None = load_candidate(paths, rel)
 
-    attempt = 1
+    attempt: int = 1
     while attempt <= config.max_attempts:
         if candidate and not forced and candidate.status != "verified":
             logger.log(
@@ -941,6 +1107,8 @@ def run_spec_pipeline(
                 color="cyan",
                 enabled=config.color_output,
             )
+            verified: bool
+            vout: str
             verified, vout = verify_candidate(
                 spec=spec,
                 paths=paths,
@@ -960,7 +1128,7 @@ def run_spec_pipeline(
                 return SpecResult.COMPLETED
             verifier_feedback = output_tail(vout)
             candidate = None
-            delay = backoff_delay(attempt)
+            delay: float = backoff_delay(attempt)
             logger.log("backoff_wait", phase="verify", spec=rel, attempt=attempt, wait_seconds=delay, reason="verify_failed")
             print_status(
                 "retry",
@@ -980,27 +1148,29 @@ def run_spec_pipeline(
         )
         logger.log("impl_start", spec=rel, attempt=attempt)
 
-        impl_run_dir = make_run_dir(paths, spec.spec_id)
-        impl_prompt = build_implementer_prompt(
+        impl_run_dir: Path = make_run_dir(paths, spec.spec_id)
+        impl_prompt: str = build_implementer_prompt(
             spec=spec,
             paths=paths,
             config=config,
             verifier_feedback=verifier_feedback,
         )
+        resume_session_id: str | None = get_resume_session_id(paths, rel, "impl")
 
         try:
-            res = run_codex(
+            res: CodexRunResult = run_codex(
                 codex_exe=config.codex_exe,
                 codex_args=config.codex_args,
                 prompt=impl_prompt,
                 workspace_root=config.workspace_root,
                 stream_to_console=config.stream_output,
+                resume_session_id=resume_session_id,
             )
         except Exception:
             err = traceback.format_exc()
             write_run_log(impl_run_dir, "impl-exception.log", err)
             logger.log("impl_exception", spec=rel, attempt=attempt, error=err)
-            delay = backoff_delay(attempt)
+            delay: float = backoff_delay(attempt)
             logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="exception")
             print_status(
                 "wait",
@@ -1013,7 +1183,13 @@ def run_spec_pipeline(
             continue
 
         write_run_log(impl_run_dir, f"impl-attempt-{attempt}.log", res.output_text)
-        summary = summarize_output(res.output_text)
+        summary: dict[str, Any] = summarize_output(res.output_text)
+        tokens_used: int | None = parse_tokens_used(res.output_text)
+        session_id: str | None = parse_session_id(res.output_text)
+        if session_id is not None:
+            update_session_info(paths=paths, spec=spec, phase="impl", session_id=session_id)
+        ok: bool
+        commit: str | None
         ok, commit = completion_tuple(res.output_text, config.magic_phrase)
         logger.log(
             "impl_run_complete",
@@ -1022,12 +1198,18 @@ def run_spec_pipeline(
             exit_code=res.exit_code,
             completion_ok=ok,
             completion_commit=commit,
+            session_id=session_id,
+            resumed_from_session=resume_session_id,
+            tokens_used=tokens_used,
             run_dir=to_rel_posix(impl_run_dir, paths.ralph_home),
             **summary,
         )
 
         if looks_like_usage_limit(res.output_text):
-            reset = parse_reset_seconds(res.output_text)
+            reset: int | None = parse_reset_seconds(res.output_text)
+            wait_s: int
+            reason: str
+            msg: str
             if reset is not None:
                 wait_s = reset + 30
                 reason = "reset_seconds"
@@ -1052,7 +1234,7 @@ def run_spec_pipeline(
 
         if res.exit_code != 0:
             logger.log("impl_nonzero_exit", spec=rel, attempt=attempt, exit_code=res.exit_code)
-            delay = backoff_delay(attempt)
+            delay: float = backoff_delay(attempt)
             logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="nonzero_exit")
             print_status(
                 "wait",
@@ -1066,7 +1248,7 @@ def run_spec_pipeline(
 
         if not ok or commit is None:
             logger.log("impl_no_completion", spec=rel, attempt=attempt)
-            delay = backoff_delay(attempt)
+            delay: float = backoff_delay(attempt)
             logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="no_completion")
             print_status(
                 "retry",
@@ -1105,6 +1287,8 @@ def run_spec_pipeline(
 
         # Verify candidate immediately
         candidate = c
+        verified: bool
+        vout: str
         verified, vout = verify_candidate(
             spec=spec,
             paths=paths,
@@ -1126,7 +1310,7 @@ def run_spec_pipeline(
         # Not verified: use verifier output tail as feedback for next impl attempt
         verifier_feedback = output_tail(vout)
         candidate = None
-        delay = backoff_delay(attempt)
+        delay: float = backoff_delay(attempt)
         logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="verify_failed")
         print_status(
             "retry",
@@ -1195,6 +1379,7 @@ def main() -> int:
     paths.specs_root.mkdir(parents=True, exist_ok=True)
     paths.candidates_root.mkdir(parents=True, exist_ok=True)
     paths.done_root.mkdir(parents=True, exist_ok=True)
+    paths.sessions_root.mkdir(parents=True, exist_ok=True)
     paths.runs_root.mkdir(parents=True, exist_ok=True)
 
     ensure_file(
@@ -1250,6 +1435,7 @@ def main() -> int:
         specs_root=paths.specs_root.as_posix(),
         candidates_root=paths.candidates_root.as_posix(),
         done_root=paths.done_root.as_posix(),
+        sessions_root=paths.sessions_root.as_posix(),
         runs_root=paths.runs_root.as_posix(),
         scratchpad=paths.scratchpad.as_posix(),
         magic_phrase=config.magic_phrase,
