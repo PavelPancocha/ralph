@@ -1,7 +1,8 @@
-# Copyright (C) 2025 Zemtu OG
+# Copyright (C) 2025-2026 Zemtu OG
 
 #!/usr/bin/env python3
 """
+
 ralph.py - Ralph Driven Development (RDD) runner (Codex-oriented)
 
 State model per spec:
@@ -56,15 +57,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Final, Iterable
 
 
 # -----------------------------
 # Defaults
 # -----------------------------
 
-DEFAULT_MAGIC_PHRASE = "I AM HYPER SURE I AM DONE!"
-DEFAULT_MAX_ATTEMPTS = 10
+DEFAULT_MAGIC_PHRASE: Final[str] = "I AM HYPER SURE I AM DONE!"
+DEFAULT_MAX_ATTEMPTS: Final[int] = 10
+DEFAULT_USAGE_LIMIT_WAIT_SECONDS: Final[int] = 5
 
 # YOLO + skip git check by default
 DEFAULT_CODEX_ARGS = (
@@ -822,16 +824,24 @@ def verify_candidate(
         reset = parse_reset_seconds(res.output_text)
         if reset is not None:
             wait_s = reset + 30
-            logger.log("usage_limit_wait", phase="verify", spec=spec.rel_from_specs, attempt=attempt, wait_seconds=wait_s)
-            print_status(
-                "wait",
-                f"usage limit reached during verify; sleeping {wait_s}s before retry",
-                color="yellow",
-                enabled=config.color_output,
-            )
-            time.sleep(wait_s)
-            return False, res.output_text
-        raise RuntimeError("Codex usage limit reached during verify (could not parse reset time).")
+            reason = "reset_seconds"
+            msg = f"usage limit reached during verify; sleeping {wait_s}s before retry"
+        else:
+            wait_s = DEFAULT_USAGE_LIMIT_WAIT_SECONDS
+            reason = "unknown_reset"
+            msg = f"usage limit reached during verify; sleeping {wait_s}s before retry (no reset info)"
+        logger.log(
+            "usage_limit_wait",
+            phase="verify",
+            spec=spec.rel_from_specs,
+            attempt=attempt,
+            wait_seconds=wait_s,
+            reset_seconds=reset,
+            reason=reason,
+        )
+        print_status("wait", msg, color="yellow", enabled=config.color_output)
+        time.sleep(wait_s)
+        return False, res.output_text
 
     if res.exit_code != 0:
         logger.log("verify_nonzero_exit", spec=spec.rel_from_specs, attempt=attempt, exit_code=res.exit_code)
@@ -1020,17 +1030,25 @@ def run_spec_pipeline(
             reset = parse_reset_seconds(res.output_text)
             if reset is not None:
                 wait_s = reset + 30
-                logger.log("usage_limit_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=wait_s)
-                print_status(
-                    "wait",
-                    f"usage limit reached; sleeping {wait_s}s before retry",
-                    color="yellow",
-                    enabled=config.color_output,
-                )
-                time.sleep(wait_s)
-                attempt += 1
-                continue
-            raise RuntimeError("Codex usage limit reached during impl (could not parse reset time).")
+                reason = "reset_seconds"
+                msg = f"usage limit reached; sleeping {wait_s}s before retry"
+            else:
+                wait_s = DEFAULT_USAGE_LIMIT_WAIT_SECONDS
+                reason = "unknown_reset"
+                msg = f"usage limit reached; sleeping {wait_s}s before retry (no reset info)"
+            logger.log(
+                "usage_limit_wait",
+                phase="impl",
+                spec=rel,
+                attempt=attempt,
+                wait_seconds=wait_s,
+                reset_seconds=reset,
+                reason=reason,
+            )
+            print_status("wait", msg, color="yellow", enabled=config.color_output)
+            time.sleep(wait_s)
+            attempt += 1
+            continue
 
         if res.exit_code != 0:
             logger.log("impl_nonzero_exit", spec=rel, attempt=attempt, exit_code=res.exit_code)
