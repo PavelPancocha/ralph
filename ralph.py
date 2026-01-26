@@ -187,6 +187,7 @@ USAGE_LIMIT_PATTERNS: Final[tuple[str, ...]] = (
     "rate_limit_exceeded",
     "RateLimitError",
 )
+USAGE_LIMIT_TAIL_LINES: Final[int] = 200
 RESET_SECONDS_RE: Final[re.Pattern[str]] = re.compile(r'resets_in_seconds\\?"\s*:\s*(\d+)')
 RESET_AT_RE: Final[re.Pattern[str]] = re.compile(r'resets_at\\?"\s*:\s*(\d+)')
 SESSION_ID_RE: Final[re.Pattern[str]] = re.compile(
@@ -872,7 +873,7 @@ def write_run_log(run_dir: Path, filename: str, text: str) -> Path:
     return p
 
 
-def output_tail(text: str, max_lines: int = 200) -> str:
+def output_tail(text: str, max_lines: int = USAGE_LIMIT_TAIL_LINES) -> str:
     lines: list[str] = text.splitlines()
     if len(lines) <= max_lines:
         return text
@@ -983,8 +984,9 @@ def verify_candidate(
         **summary,
     )
 
-    if looks_like_usage_limit(res.output_text):
-        reset: int | None = parse_reset_seconds(res.output_text)
+    usage_text: str = output_tail(res.output_text, max_lines=USAGE_LIMIT_TAIL_LINES)
+    if not ok and looks_like_usage_limit(usage_text):
+        reset: int | None = parse_reset_seconds(usage_text)
         wait_s: int
         reason: str
         msg: str
@@ -1205,8 +1207,9 @@ def run_spec_pipeline(
             **summary,
         )
 
-        if looks_like_usage_limit(res.output_text):
-            reset: int | None = parse_reset_seconds(res.output_text)
+        usage_text: str = output_tail(res.output_text, max_lines=USAGE_LIMIT_TAIL_LINES)
+        if not ok and looks_like_usage_limit(usage_text):
+            reset: int | None = parse_reset_seconds(usage_text)
             wait_s: int
             reason: str
             msg: str
