@@ -55,7 +55,17 @@ python ralph/ralph.py --json-logs
 
 ```
 ralph/
-├── ralph.py           # The runner
+├── ralph.py           # Thin entry point (imports _cli.main)
+├── _types.py          # Constants, enums, dataclasses, regex patterns
+├── _util.py           # Pure utilities: time, path, ANSI, backoff
+├── _logger.py         # Logger class
+├── _parsing.py        # Codex output parsing (completion, usage limit, session id)
+├── _paths.py          # Path builder functions
+├── _state.py          # State persistence (candidates, sessions, plans, done) + spec discovery
+├── _prompts.py        # Prompt template builders
+├── _codex.py          # Codex invocation, run logging, args normalization
+├── _pipeline.py       # Pipeline phases + DRY helpers (handle_usage_limit, handle_plan_invalidation)
+├── _cli.py            # parse_args + main
 ├── SCRATCHPAD.md      # Shared memory for agent handover
 ├── ralph.log          # Runner event log
 ├── specs/
@@ -72,9 +82,27 @@ ralph/
         └── verify.log
 ```
 
+### Module Dependency Graph (strict DAG)
+
+```
+_types      -> (stdlib only)
+_util       -> (stdlib only)
+_logger     -> (stdlib only)
+_parsing    -> _types
+_paths      -> _types
+_state      -> _types, _paths, _util
+_prompts    -> _types, _paths
+_codex      -> _types, _util
+_pipeline   -> _types, _util, _parsing, _logger, _paths, _state, _prompts, _codex
+_cli        -> _types, _util, _logger, _paths, _state, _codex, _pipeline
+ralph.py    -> _cli
+```
+
 ### Key Files
 
-- `ralph.py` - Single-file runner (~1300 lines)
+- `ralph.py` - Entry point (~15 lines, imports `main` from `_cli`)
+- `_pipeline.py` - Core pipeline logic (plan/implement/verify phases)
+- `_cli.py` - CLI argument parsing and main orchestration
 - `SCRATCHPAD.md` - Agent handover notes (read/update between runs)
 - `specs/` - Spec backlog (only `^\d{4}-.*\.md$` files are executed)
 - `ralph.log` - Runner events (text or JSONL)
