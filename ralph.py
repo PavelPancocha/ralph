@@ -5,8 +5,11 @@
 
 ralph.py - Ralph Driven Development (RDD) runner (Codex-oriented)
 
+Pipeline: spec -> plan -> implement -> verify -> done
+
 State model per spec:
-- Not started: no candidate file, no done file
+- Not started: no plan file, no candidate file, no done file
+- Planned: specs/plans/<rel_spec>.md + .json exists (status: "active")
 - Candidate: specs/candidates/<rel_spec>.json exists (contains candidate commit hash)
 - Verified done: specs/done/<rel_spec>.md exists (contains candidate commit hash)
 
@@ -15,12 +18,17 @@ Directory layout (relative to this script dir, i.e. ralph/):
     ralph.py
     SCRATCHPAD.md
     runs/
+      <spec_id>/<utcstamp>/plan-attempt-1.log
       <spec_id>/<utcstamp>/impl-attempt-1.log
       <spec_id>/<utcstamp>/verify-attempt-1.log
       ...
     specs/
       0001-foo.md
       area/0002-bar.md
+      plans/
+        0001-foo.md          (active plan)
+        0001-foo.json        (plan metadata)
+        0001-foo.attempt-1.md (archived invalidated plan)
       candidates/
         0001-foo.json
         area/0002-bar.json
@@ -32,9 +40,17 @@ Workspace root:
 - Default: parent directory of ralph/ (so repos can be siblings of ralph/)
 - Override with --workspace-root
 
-Completion contract (strict) for both implementer and verifier runs:
+Completion contract (strict) for implementer and verifier runs:
 - Second-to-last non-empty line: 40-char git commit hash (lowercase hex)
 - Last non-empty line: magic phrase (default: I AM HYPER SURE I AM DONE!)
+
+Completion contract (strict) for planner runs:
+- Plan file must exist and be non-empty
+- Last non-empty line: magic phrase
+
+Plan invalidation:
+- Verifier can mark a plan as fundamentally flawed via PLAN_INVALIDATION marker.
+- Old plan is archived as attempt-N.md, new planner run gets the old plan + reason.
 
 Important:
 - The runner does NOT run your tests itself.
@@ -55,7 +71,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any, Final, Iterable, Literal, TypeAlias
 
@@ -75,6 +91,15 @@ DEFAULT_CODEX_ARGS: Final[str] = (
     "--skip-git-repo-check"
 )
 
+class CandidateStatus(StrEnum):
+    CANDIDATE = "candidate"
+    VERIFIED = "verified"
+
+
+class PlanStatus(StrEnum):
+    ACTIVE = "active"
+    INVALIDATED = "invalidated"
+
 
 # -----------------------------
 # Types
@@ -87,7 +112,7 @@ class SpecResult(Enum):
     DRY_RUN = "dry_run"
 
 
-SessionPhase: TypeAlias = Literal["impl", "verify"]
+SessionPhase: TypeAlias = Literal["plan", "impl", "verify"]
 
 
 @dataclass(frozen=True)
@@ -100,6 +125,7 @@ class Paths:
     candidates_root: Path
     done_root: Path
     sessions_root: Path
+    plans_root: Path
 
     runner_log: Path
 
@@ -135,16 +161,28 @@ class CandidateInfo:
     created_at_utc: str
     last_impl_run_dir: str | None
     last_verify_run_dir: str | None
-    status: str  # "candidate" | "verified"
+    status: CandidateStatus
 
 
 @dataclass(frozen=True)
 class SessionInfo:
     spec_rel: str
     spec_id: str
+    plan_session_id: str | None
     impl_session_id: str | None
     verify_session_id: str | None
     updated_at_utc: str
+
+
+@dataclass(frozen=True)
+class PlanInfo:
+    spec_rel: str
+    spec_id: str
+    status: PlanStatus
+    created_at_utc: str
+    invalidated_at_utc: str | None
+    invalidation_reason: str | None
+    attempt: int
 
 
 # -----------------------------
@@ -197,6 +235,10 @@ SESSION_ID_RE: Final[re.Pattern[str]] = re.compile(
 TOKENS_USED_MARKER: Final[str] = "tokens used"
 
 COMMIT_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
+PLAN_INVALIDATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"^PLAN_INVALIDATION:\s*(.+)$",
+    re.MULTILINE,
+)
 COMPACT_PROMPT_PREFIX: Final[str] = (
     "Before starting, compact the conversation into a concise internal summary. "
     "Do not output the summary. Then proceed with the task.\n\n"
@@ -304,6 +346,23 @@ def completion_tuple(output_text: str, phrase: str) -> tuple[bool, str | None]:
     if COMMIT_RE.fullmatch(commit):
         return True, commit
     return False, None
+
+
+def planner_completed(output_text: str, plan_path: Path, phrase: str) -> bool:
+    if not plan_path.exists():
+        return False
+    content: str = plan_path.read_text(encoding="utf-8")
+    if not content.strip():
+        return False
+    lines: list[str] = [ln.strip() for ln in output_text.splitlines() if ln.strip()]
+    return bool(lines) and lines[-1] == phrase
+
+
+def parse_plan_invalidation(output_text: str) -> str | None:
+    match: re.Match[str] | None = PLAN_INVALIDATION_RE.search(output_text)
+    if not match:
+        return None
+    return match.group(1).strip()
 
 
 def has_any_flag(args: list[str], flags: Iterable[str]) -> bool:
@@ -425,6 +484,7 @@ def build_paths(ralph_home: Path) -> Paths:
         candidates_root=specs_root / "candidates",
         done_root=specs_root / "done",
         sessions_root=specs_root / "sessions",
+        plans_root=specs_root / "plans",
         runner_log=ralph_home / "ralph.log",
     )
 
@@ -442,6 +502,14 @@ def done_path_for_spec(paths: Paths, rel_from_specs: str) -> Path:
 def session_path_for_spec(paths: Paths, rel_from_specs: str) -> Path:
     # mirror spec path, but .json
     return (paths.sessions_root / rel_from_specs).with_suffix(".json")
+
+
+def plan_path_for_spec(paths: Paths, rel_from_specs: str) -> Path:
+    return (paths.plans_root / rel_from_specs).with_suffix(".md")
+
+
+def plan_meta_path_for_spec(paths: Paths, rel_from_specs: str) -> Path:
+    return (paths.plans_root / rel_from_specs).with_suffix(".json")
 
 
 def is_under_dir(path: Path, parent: Path) -> bool:
@@ -482,6 +550,7 @@ def discover_specs(paths: Paths, validate: bool) -> list[Path]:
             is_under_dir(p, paths.candidates_root)
             or is_under_dir(p, paths.done_root)
             or is_under_dir(p, paths.sessions_root)
+            or is_under_dir(p, paths.plans_root)
         ):
             continue
         if p.name in {"README.md", "done.md"}:
@@ -534,7 +603,7 @@ def load_candidate(paths: Paths, rel_from_specs: str) -> CandidateInfo | None:
             created_at_utc=raw["created_at_utc"],
             last_impl_run_dir=raw.get("last_impl_run_dir"),
             last_verify_run_dir=raw.get("last_verify_run_dir"),
-            status=raw.get("status", "candidate"),
+            status=CandidateStatus(raw.get("status", CandidateStatus.CANDIDATE)),
         )
     except Exception:
         # Corrupt candidate file: treat as absent (but keep file for inspection)
@@ -566,6 +635,7 @@ def load_session_info(paths: Paths, rel_from_specs: str) -> SessionInfo | None:
         return SessionInfo(
             spec_rel=raw["spec_rel"],
             spec_id=raw["spec_id"],
+            plan_session_id=raw.get("plan_session_id"),
             impl_session_id=raw.get("impl_session_id"),
             verify_session_id=raw.get("verify_session_id"),
             updated_at_utc=raw["updated_at_utc"],
@@ -581,6 +651,7 @@ def save_session_info(paths: Paths, info: SessionInfo) -> Path:
     payload: dict[str, Any] = {
         "spec_rel": info.spec_rel,
         "spec_id": info.spec_id,
+        "plan_session_id": info.plan_session_id,
         "impl_session_id": info.impl_session_id,
         "verify_session_id": info.verify_session_id,
         "updated_at_utc": info.updated_at_utc,
@@ -597,9 +668,12 @@ def update_session_info(
     session_id: str,
 ) -> SessionInfo:
     existing: SessionInfo | None = load_session_info(paths, spec.rel_from_specs)
+    plan_session_id: str | None = existing.plan_session_id if existing else None
     impl_session_id: str | None = existing.impl_session_id if existing else None
     verify_session_id: str | None = existing.verify_session_id if existing else None
-    if phase == "impl":
+    if phase == "plan":
+        plan_session_id = session_id
+    elif phase == "impl":
         impl_session_id = session_id
     else:
         verify_session_id = session_id
@@ -607,6 +681,7 @@ def update_session_info(
     info: SessionInfo = SessionInfo(
         spec_rel=spec.rel_from_specs,
         spec_id=spec.spec_id,
+        plan_session_id=plan_session_id,
         impl_session_id=impl_session_id,
         verify_session_id=verify_session_id,
         updated_at_utc=updated_at_utc,
@@ -619,6 +694,8 @@ def get_resume_session_id(paths: Paths, rel_from_specs: str, phase: SessionPhase
     info: SessionInfo | None = load_session_info(paths, rel_from_specs)
     if not info:
         return None
+    if phase == "plan":
+        return info.plan_session_id
     if phase == "impl":
         return info.impl_session_id
     return info.verify_session_id
@@ -653,10 +730,196 @@ def save_done_file(
 
 
 # -----------------------------
+# Plan state
+# -----------------------------
+
+
+def load_plan_info(paths: Paths, rel_from_specs: str) -> PlanInfo | None:
+    mpath: Path = plan_meta_path_for_spec(paths, rel_from_specs)
+    ppath: Path = plan_path_for_spec(paths, rel_from_specs)
+    if mpath.exists():
+        try:
+            raw: dict[str, Any] = json.loads(mpath.read_text(encoding="utf-8"))
+            status: PlanStatus = PlanStatus(raw.get("status", PlanStatus.ACTIVE))
+            # If marked active but plan file is missing/empty, needs re-planning
+            if status == PlanStatus.ACTIVE and (
+                not ppath.exists() or not ppath.read_text(encoding="utf-8").strip()
+            ):
+                status = PlanStatus.INVALIDATED
+            return PlanInfo(
+                spec_rel=raw["spec_rel"],
+                spec_id=raw["spec_id"],
+                status=status,
+                created_at_utc=raw["created_at_utc"],
+                invalidated_at_utc=raw.get("invalidated_at_utc"),
+                invalidation_reason=raw.get("invalidation_reason", "plan file missing"),
+                attempt=raw.get("attempt", 1),
+            )
+        except Exception:
+            return None
+    # Hand-written plan: .md exists but no .json — treat as active
+    if ppath.exists() and ppath.read_text(encoding="utf-8").strip():
+        now_utc: str = datetime.now(timezone.utc).isoformat()
+        info = PlanInfo(
+            spec_rel=rel_from_specs,
+            spec_id=Path(rel_from_specs).stem,
+            status=PlanStatus.ACTIVE,
+            created_at_utc=now_utc,
+            invalidated_at_utc=None,
+            invalidation_reason=None,
+            attempt=1,
+        )
+        save_plan_info(paths, info)
+        return info
+    return None
+
+
+def save_plan_info(paths: Paths, info: PlanInfo) -> Path:
+    mpath: Path = plan_meta_path_for_spec(paths, info.spec_rel)
+    mpath.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "spec_rel": info.spec_rel,
+        "spec_id": info.spec_id,
+        "status": info.status,
+        "created_at_utc": info.created_at_utc,
+        "invalidated_at_utc": info.invalidated_at_utc,
+        "invalidation_reason": info.invalidation_reason,
+        "attempt": info.attempt,
+    }
+    mpath.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return mpath
+
+
+def load_plan_content(paths: Paths, rel_from_specs: str) -> str | None:
+    ppath: Path = plan_path_for_spec(paths, rel_from_specs)
+    if not ppath.exists():
+        return None
+    content: str = ppath.read_text(encoding="utf-8")
+    if not content.strip():
+        return None
+    return content
+
+
+def invalidate_plan(paths: Paths, rel_from_specs: str, reason: str) -> PlanInfo:
+    """Archive current plan as attempt-N.md and mark metadata as invalidated."""
+    info: PlanInfo | None = load_plan_info(paths, rel_from_specs)
+    current_attempt: int = info.attempt if info else 1
+    created_at: str = info.created_at_utc if info else datetime.now(timezone.utc).isoformat()
+
+    # Rename active plan to attempt-N
+    ppath: Path = plan_path_for_spec(paths, rel_from_specs)
+    if ppath.exists():
+        archive_name: str = ppath.stem + f".attempt-{current_attempt}" + ppath.suffix
+        archive_path: Path = ppath.with_name(archive_name)
+        ppath.rename(archive_path)
+
+    now_utc: str = datetime.now(timezone.utc).isoformat()
+    updated: PlanInfo = PlanInfo(
+        spec_rel=rel_from_specs,
+        spec_id=Path(rel_from_specs).stem,
+        status=PlanStatus.INVALIDATED,
+        created_at_utc=created_at,
+        invalidated_at_utc=now_utc,
+        invalidation_reason=reason,
+        attempt=current_attempt,
+    )
+    save_plan_info(paths, updated)
+    return updated
+
+
+# -----------------------------
 
 # Prompting
 
 # -----------------------------
+
+
+def build_planner_prompt(
+    *,
+    spec: SpecInfo,
+    paths: Paths,
+    config: Config,
+    previous_plan: str | None,
+    invalidation_reason: str | None,
+) -> str:
+    plan_output_path: Path = plan_path_for_spec(paths, spec.rel_from_specs)
+
+    replanning_block: str = ""
+    if previous_plan and invalidation_reason:
+        replanning_block = (
+            "\n"
+            "IMPORTANT: A previous plan was invalidated. Learn from its mistakes.\n"
+            "\n"
+            f"Invalidation reason: {invalidation_reason}\n"
+            "\n"
+            "Previous plan (DO NOT repeat the same approach):\n"
+            "\n"
+            f"{previous_plan.rstrip()}\n"
+            "\n"
+        )
+
+    return f"""You are a planning agent in a Ralph Driven Development (RDD) pipeline.
+
+NON-INTERACTIVE RULE: Do not ask the user questions. Make reasonable assumptions and record them in SCRATCHPAD.md.
+
+Paths:
+
+* Workspace root (repos live here): {config.workspace_root.as_posix()}
+* Ralph home (tooling dir): {paths.ralph_home.as_posix()}
+* Spec file (relative to workspace root): {spec.rel_from_workspace}
+* Spec file (relative to specs root): {spec.rel_from_specs}
+* Scratchpad: {paths.scratchpad.as_posix()}
+* Plan output file: {plan_output_path.as_posix()}
+
+Mission:
+
+* Read and understand the spec fully.
+* Explore the codebase to understand the target repo structure, existing patterns, and relevant files.
+* Produce a concrete, step-by-step implementation plan.
+* Write the plan to the plan output file above.
+
+Constraints:
+
+* READ-ONLY: Do NOT modify any code, do NOT create commits. Only write the plan file and update SCRATCHPAD.md.
+* You may run any read-only commands: ls, cat, grep, find, git log, git show, etc.
+* Do NOT run tests, builds, or anything that modifies state.
+
+Plan format (write this to the plan output file):
+
+# Plan: {spec.spec_id}
+
+## Analysis
+- Target repo: <repo name and path>
+- Key files to modify: <list with paths>
+- Key files to read for context: <list with paths>
+- Approach: <description of the approach>
+- Risks/trade-offs: <any concerns>
+
+## Steps
+1. <concrete step with file paths and what to do>
+2. <next step>
+...
+
+## Verification strategy
+- <specific test commands to run>
+- <what to check>
+
+Update SCRATCHPAD.md with:
+
+* What you explored and key findings
+* Why you chose this approach
+* Any assumptions you made
+
+Output contract (STRICT):
+
+1. Write the plan to the plan output file.
+2. Print ONLY this exact magic phrase on its own line as the FINAL non-empty line:
+   {config.magic_phrase}
+
+Do not print anything after the magic phrase.
+{replanning_block}
+Now read the spec and plan the implementation.
+"""
 
 
 def build_implementer_prompt(
@@ -665,6 +928,7 @@ def build_implementer_prompt(
     paths: Paths,
     config: Config,
     verifier_feedback: str | None,
+    plan_content: str | None,
 ) -> str:
     feedback_block = ""
     if verifier_feedback:
@@ -673,6 +937,17 @@ def build_implementer_prompt(
             "Verifier feedback from the last verification attempt (fix these issues):\n"
             "\n"
             f"{verifier_feedback.rstrip()}\n"
+            "\n"
+        )
+
+    plan_block: str = ""
+    if plan_content:
+        plan_block = (
+            "\n"
+            "Implementation Plan (created by analyzing the spec and codebase — follow closely,\n"
+            "but adapt if you discover it is wrong or incomplete):\n"
+            "\n"
+            f"{plan_content.rstrip()}\n"
             "\n"
         )
 
@@ -693,7 +968,7 @@ State dirs (DO NOT modify these manually unless the spec explicitly says so):
 * Candidates: {paths.candidates_root.as_posix()}
 * Done:       {paths.done_root.as_posix()}
 * Runs:       {paths.runs_root.as_posix()}
-
+{plan_block}
 Mission:
 
 * Implement the spec precisely.
@@ -731,7 +1006,28 @@ def build_verifier_prompt(
     paths: Paths,
     config: Config,
     candidate_commit: str,
+    plan_content: str | None,
 ) -> str:
+    plan_eval_block: str = ""
+    if plan_content:
+        plan_eval_block = (
+            "\n"
+            "Plan evaluation:\n"
+            "\n"
+            "The implementer followed this plan:\n"
+            "\n"
+            f"{plan_content.rstrip()}\n"
+            "\n"
+            "If the implementation failed due to a fundamentally flawed plan\n"
+            "(wrong approach, wrong files, incorrect assumptions about the codebase),\n"
+            "include this EXACT line in your failure report:\n"
+            "\n"
+            "PLAN_INVALIDATION: <one-line reason why the plan approach is wrong>\n"
+            "\n"
+            "Only use PLAN_INVALIDATION when the plan's APPROACH itself is wrong,\n"
+            "NOT when the implementer just made bugs or missed details.\n"
+        )
+
     return f"""You are an independent verifier agent in a Ralph Driven Development (RDD) pipeline.
 
 Goal:
@@ -781,7 +1077,7 @@ If NOT VERIFIED:
 
 * Print a failure report with specific fixes.
 * Do NOT print the magic phrase anywhere.
-"""
+{plan_eval_block}"""
 
 
 # -----------------------------
@@ -896,7 +1192,7 @@ def summarize_output(output_text: str, max_last_len: int = 160) -> dict[str, Any
 
 # -----------------------------
 
-# Core pipeline: candidate -> verify -> done
+# Core pipeline: plan -> candidate -> verify -> done
 
 # -----------------------------
 
@@ -913,6 +1209,151 @@ def build_spec_info(spec_path: Path, paths: Paths, workspace_root: Path) -> Spec
     )
 
 
+def run_planner(
+    *,
+    spec: SpecInfo,
+    paths: Paths,
+    config: Config,
+    logger: Logger,
+    previous_plan: str | None,
+    invalidation_reason: str | None,
+    attempt: int,
+) -> tuple[bool, str]:
+    """
+    Returns (success, planner_output_text).
+    Success means: plan file exists, non-empty, and magic phrase in output.
+    """
+    plan_run_dir: Path = make_run_dir(paths, spec.spec_id)
+    plan_prompt: str = build_planner_prompt(
+        spec=spec,
+        paths=paths,
+        config=config,
+        previous_plan=previous_plan,
+        invalidation_reason=invalidation_reason,
+    )
+    resume_session_id: str | None = get_resume_session_id(
+        paths, spec.rel_from_specs, "plan",
+    )
+
+    logger.log(
+        "plan_start",
+        spec=spec.rel_from_specs,
+        attempt=attempt,
+        run_dir=to_rel_posix(plan_run_dir, paths.ralph_home),
+        replanning=previous_plan is not None,
+    )
+
+    try:
+        res: CodexRunResult = run_codex(
+            codex_exe=config.codex_exe,
+            codex_args=config.codex_args,
+            prompt=plan_prompt,
+            workspace_root=config.workspace_root,
+            stream_to_console=config.stream_output,
+            resume_session_id=resume_session_id,
+        )
+    except Exception:
+        err = traceback.format_exc()
+        write_run_log(plan_run_dir, "plan-exception.log", err)
+        logger.log(
+            "plan_exception",
+            spec=spec.rel_from_specs, attempt=attempt, error=err,
+        )
+        return False, "[exception]\n" + err
+
+    write_run_log(plan_run_dir, f"plan-attempt-{attempt}.log", res.output_text)
+    summary: dict[str, Any] = summarize_output(res.output_text)
+    tokens_used: int | None = parse_tokens_used(res.output_text)
+    session_id: str | None = parse_session_id(res.output_text)
+    if session_id is not None:
+        update_session_info(
+            paths=paths, spec=spec, phase="plan", session_id=session_id,
+        )
+
+    plan_file: Path = plan_path_for_spec(paths, spec.rel_from_specs)
+    completed: bool = planner_completed(
+        res.output_text, plan_file, config.magic_phrase,
+    )
+
+    logger.log(
+        "plan_run_complete",
+        spec=spec.rel_from_specs,
+        attempt=attempt,
+        exit_code=res.exit_code,
+        completed=completed,
+        plan_file_exists=plan_file.exists(),
+        session_id=session_id,
+        resumed_from_session=resume_session_id,
+        tokens_used=tokens_used,
+        run_dir=to_rel_posix(plan_run_dir, paths.ralph_home),
+        **summary,
+    )
+
+    # Handle usage limits
+    usage_text: str = output_tail(
+        res.output_text, max_lines=USAGE_LIMIT_TAIL_LINES,
+    )
+    if not completed and looks_like_usage_limit(usage_text):
+        reset: int | None = parse_reset_seconds(usage_text)
+        wait_s: int
+        msg: str
+        if reset is not None:
+            wait_s = reset + 30
+            reason = "reset_seconds"
+            msg = (
+                f"usage limit reached during plan; "
+                f"sleeping {wait_s}s before retry"
+            )
+        else:
+            wait_s = DEFAULT_USAGE_LIMIT_WAIT_SECONDS
+            reason = "unknown_reset"
+            msg = (
+                f"usage limit reached during plan; "
+                f"sleeping {wait_s}s before retry (no reset info)"
+            )
+        logger.log(
+            "usage_limit_wait",
+            phase="plan",
+            spec=spec.rel_from_specs,
+            attempt=attempt,
+            wait_seconds=wait_s,
+            reset_seconds=reset,
+            reason=reason,
+        )
+        print_status("wait", msg, color="yellow", enabled=config.color_output)
+        time.sleep(wait_s)
+        return False, res.output_text
+
+    if completed:
+        # Save plan metadata
+        old_info: PlanInfo | None = load_plan_info(paths, spec.rel_from_specs)
+        if old_info and old_info.status == PlanStatus.INVALIDATED:
+            new_attempt: int = old_info.attempt + 1
+        elif old_info and old_info.status == PlanStatus.ACTIVE:
+            new_attempt = old_info.attempt
+        else:
+            new_attempt = 1
+        active_info: PlanInfo = PlanInfo(
+            spec_rel=spec.rel_from_specs,
+            spec_id=spec.spec_id,
+            status=PlanStatus.ACTIVE,
+            created_at_utc=datetime.now(timezone.utc).isoformat(),
+            invalidated_at_utc=None,
+            invalidation_reason=None,
+            attempt=new_attempt,
+        )
+        save_plan_info(paths, active_info)
+        logger.log(
+            "plan_pass",
+            spec=spec.rel_from_specs,
+            attempt=attempt,
+            plan_attempt=new_attempt,
+            plan_file=to_rel_posix(plan_file, paths.ralph_home),
+        )
+
+    return completed, res.output_text
+
+
 def verify_candidate(
     *,
     spec: SpecInfo,
@@ -921,6 +1362,7 @@ def verify_candidate(
     logger: Logger,
     candidate: CandidateInfo,
     attempt: int,
+    plan_content: str | None,
 ) -> tuple[bool, str]:
     """
     Returns (verified, verifier_output_text).
@@ -933,6 +1375,7 @@ def verify_candidate(
         paths=paths,
         config=config,
         candidate_commit=candidate.candidate_commit,
+        plan_content=plan_content,
     )
     resume_session_id: str | None = get_resume_session_id(paths, spec.rel_from_specs, "verify")
 
@@ -1024,7 +1467,7 @@ def verify_candidate(
             created_at_utc=candidate.created_at_utc,
             last_impl_run_dir=candidate.last_impl_run_dir,
             last_verify_run_dir=to_rel_posix(verify_run_dir, paths.ralph_home),
-            status="verified",
+            status=CandidateStatus.VERIFIED,
         )
         save_candidate(paths, updated)
 
@@ -1069,31 +1512,110 @@ def run_spec_pipeline(
     """
     For a single spec:
     - If done and not forced: skip
-    - If candidate exists and not forced: verify it; if verified mark done; else implement fixes
+    - Ensure active plan exists (run planner if needed)
+    - If candidate exists: verify; if verified mark done
     - Otherwise: implement -> candidate -> verify -> done
+    - On verify fail with PLAN_INVALIDATION: invalidate plan, re-plan, re-implement
+    - On verify fail (normal): re-implement with feedback
     """
     rel: str = spec.rel_from_specs
     forced: bool = rel in config.force_specs
-    logger.log("spec_start", spec=rel, forced=forced, already_done=rel in done_set, dry_run=config.dry_run)
+    logger.log(
+        "spec_start", spec=rel, forced=forced,
+        already_done=rel in done_set, dry_run=config.dry_run,
+    )
 
     if rel in done_set and not forced:
-        print_status("skip", f"already done: {rel}", color="gray", enabled=config.color_output)
+        print_status(
+            "skip", f"already done: {rel}",
+            color="gray", enabled=config.color_output,
+        )
         logger.log("spec_skipped", spec=rel)
         return SpecResult.SKIPPED
 
     if config.dry_run:
-        print_status("dry-run", f"would run: {rel}", color="yellow", enabled=config.color_output)
+        print_status(
+            "dry-run", f"would run: {rel}",
+            color="yellow", enabled=config.color_output,
+        )
         logger.log("spec_dry_run", spec=rel)
         return SpecResult.DRY_RUN
 
     verifier_feedback: str | None = None
-
-    # If there is a candidate already (e.g. from previous interrupted run), try verify first.
     candidate: CandidateInfo | None = load_candidate(paths, rel)
 
     attempt: int = 1
     while attempt <= config.max_attempts:
-        if candidate and not forced and candidate.status != "verified":
+        # --- Phase 1: Ensure active plan exists ---
+        plan_info: PlanInfo | None = load_plan_info(paths, rel)
+        if plan_info is None or plan_info.status == PlanStatus.INVALIDATED:
+            previous_plan: str | None = None
+            invalidation_reason: str | None = None
+            if plan_info and plan_info.status == PlanStatus.INVALIDATED:
+                archive_name: str = (
+                    Path(rel).stem
+                    + f".attempt-{plan_info.attempt}"
+                    + Path(rel).suffix
+                )
+                archive_path: Path = plan_path_for_spec(
+                    paths, rel,
+                ).with_name(archive_name)
+                if archive_path.exists():
+                    previous_plan = archive_path.read_text(encoding="utf-8")
+                invalidation_reason = plan_info.invalidation_reason
+
+            status_msg: str = (
+                f"{rel} | planning attempt {attempt}/{config.max_attempts}"
+            )
+            if invalidation_reason:
+                status_msg += f" (re-plan: {invalidation_reason})"
+            print_status(
+                "plan", status_msg,
+                color="blue", enabled=config.color_output,
+            )
+
+            plan_ok: bool
+            plan_output: str
+            plan_ok, plan_output = run_planner(
+                spec=spec,
+                paths=paths,
+                config=config,
+                logger=logger,
+                previous_plan=previous_plan,
+                invalidation_reason=invalidation_reason,
+                attempt=attempt,
+            )
+
+            if not plan_ok:
+                delay: float = backoff_delay(attempt)
+                logger.log(
+                    "backoff_wait", phase="plan", spec=rel,
+                    attempt=attempt, wait_seconds=delay,
+                    reason="plan_failed",
+                )
+                print_status(
+                    "retry",
+                    f"planner failed; backing off {delay:.1f}s",
+                    color="yellow", enabled=config.color_output,
+                )
+                time.sleep(delay)
+                attempt += 1
+                continue
+
+            print_status(
+                "planned", f"{rel} | plan ready",
+                color="cyan", enabled=config.color_output,
+            )
+            # Fresh start for implementation after re-planning
+            if invalidation_reason:
+                candidate = None
+                verifier_feedback = None
+
+        # --- Load plan content for impl/verify ---
+        plan_content: str | None = load_plan_content(paths, rel)
+
+        # --- Phase 2: Verify existing candidate ---
+        if candidate and not forced and candidate.status != CandidateStatus.VERIFIED:
             logger.log(
                 "candidate_loaded",
                 spec=rel,
@@ -1105,9 +1627,9 @@ def run_spec_pipeline(
             )
             print_status(
                 "pending",
-                f"candidate exists for {rel} @ {candidate.candidate_commit[:8]}... - verifying",
-                color="cyan",
-                enabled=config.color_output,
+                f"candidate exists for {rel} "
+                f"@ {candidate.candidate_commit[:8]}... - verifying",
+                color="cyan", enabled=config.color_output,
             )
             verified: bool
             vout: str
@@ -1118,35 +1640,71 @@ def run_spec_pipeline(
                 logger=logger,
                 candidate=candidate,
                 attempt=attempt,
+                plan_content=plan_content,
             )
             if verified:
                 done_set.add(rel)
                 print_status(
                     "done",
-                    f"{rel} (verified commit: {candidate.candidate_commit[:8]})",
-                    color="green",
-                    enabled=config.color_output,
+                    f"{rel} (verified commit: "
+                    f"{candidate.candidate_commit[:8]})",
+                    color="green", enabled=config.color_output,
                 )
                 return SpecResult.COMPLETED
+
+            # Check for plan invalidation
+            inv_reason: str | None = parse_plan_invalidation(vout)
+            if inv_reason:
+                logger.log(
+                    "plan_invalidated", spec=rel,
+                    reason=inv_reason, attempt=attempt,
+                )
+                print_status(
+                    "plan-invalid",
+                    f"plan invalidated: {inv_reason}",
+                    color="yellow", enabled=config.color_output,
+                )
+                invalidate_plan(paths, rel, inv_reason)
+                # Remove stale candidate so restart doesn't re-verify old commit
+                cpath_stale = candidate_path_for_spec(paths, rel)
+                if cpath_stale.exists():
+                    cpath_stale.unlink()
+                candidate = None
+                verifier_feedback = None
+                delay = backoff_delay(attempt)
+                logger.log(
+                    "backoff_wait", phase="plan", spec=rel,
+                    attempt=attempt, wait_seconds=delay,
+                    reason="plan_invalidated",
+                )
+                time.sleep(delay)
+                attempt += 1
+                continue
+
             verifier_feedback = output_tail(vout)
             candidate = None
-            delay: float = backoff_delay(attempt)
-            logger.log("backoff_wait", phase="verify", spec=rel, attempt=attempt, wait_seconds=delay, reason="verify_failed")
+            delay = backoff_delay(attempt)
+            logger.log(
+                "backoff_wait", phase="verify", spec=rel,
+                attempt=attempt, wait_seconds=delay,
+                reason="verify_failed",
+            )
             print_status(
                 "retry",
-                f"verifier failed; backing off {delay:.1f}s before implement attempt",
-                color="yellow",
-                enabled=config.color_output,
+                f"verifier failed; backing off {delay:.1f}s "
+                f"before implement attempt",
+                color="yellow", enabled=config.color_output,
             )
             time.sleep(delay)
             attempt += 1
             continue
 
+        # --- Phase 3: Implement ---
         print_status(
             "start",
-            f"{rel} | implement attempt {attempt}/{config.max_attempts}",
-            color="blue",
-            enabled=config.color_output,
+            f"{rel} | implement attempt "
+            f"{attempt}/{config.max_attempts}",
+            color="blue", enabled=config.color_output,
         )
         logger.log("impl_start", spec=rel, attempt=attempt)
 
@@ -1156,8 +1714,11 @@ def run_spec_pipeline(
             paths=paths,
             config=config,
             verifier_feedback=verifier_feedback,
+            plan_content=plan_content,
         )
-        resume_session_id: str | None = get_resume_session_id(paths, rel, "impl")
+        resume_session_id: str | None = get_resume_session_id(
+            paths, rel, "impl",
+        )
 
         try:
             res: CodexRunResult = run_codex(
@@ -1171,25 +1732,36 @@ def run_spec_pipeline(
         except Exception:
             err = traceback.format_exc()
             write_run_log(impl_run_dir, "impl-exception.log", err)
-            logger.log("impl_exception", spec=rel, attempt=attempt, error=err)
-            delay: float = backoff_delay(attempt)
-            logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="exception")
+            logger.log(
+                "impl_exception", spec=rel,
+                attempt=attempt, error=err,
+            )
+            delay = backoff_delay(attempt)
+            logger.log(
+                "backoff_wait", phase="impl", spec=rel,
+                attempt=attempt, wait_seconds=delay,
+                reason="exception",
+            )
             print_status(
                 "wait",
                 f"backing off {delay:.1f}s before retry",
-                color="yellow",
-                enabled=config.color_output,
+                color="yellow", enabled=config.color_output,
             )
             time.sleep(delay)
             attempt += 1
             continue
 
-        write_run_log(impl_run_dir, f"impl-attempt-{attempt}.log", res.output_text)
+        write_run_log(
+            impl_run_dir, f"impl-attempt-{attempt}.log", res.output_text,
+        )
         summary: dict[str, Any] = summarize_output(res.output_text)
         tokens_used: int | None = parse_tokens_used(res.output_text)
         session_id: str | None = parse_session_id(res.output_text)
         if session_id is not None:
-            update_session_info(paths=paths, spec=spec, phase="impl", session_id=session_id)
+            update_session_info(
+                paths=paths, spec=spec,
+                phase="impl", session_id=session_id,
+            )
         ok: bool
         commit: str | None
         ok, commit = completion_tuple(res.output_text, config.magic_phrase)
@@ -1207,7 +1779,9 @@ def run_spec_pipeline(
             **summary,
         )
 
-        usage_text: str = output_tail(res.output_text, max_lines=USAGE_LIMIT_TAIL_LINES)
+        usage_text: str = output_tail(
+            res.output_text, max_lines=USAGE_LIMIT_TAIL_LINES,
+        )
         if not ok and looks_like_usage_limit(usage_text):
             reset: int | None = parse_reset_seconds(usage_text)
             wait_s: int
@@ -1216,54 +1790,73 @@ def run_spec_pipeline(
             if reset is not None:
                 wait_s = reset + 30
                 reason = "reset_seconds"
-                msg = f"usage limit reached; sleeping {wait_s}s before retry"
+                msg = (
+                    f"usage limit reached; "
+                    f"sleeping {wait_s}s before retry"
+                )
             else:
                 wait_s = DEFAULT_USAGE_LIMIT_WAIT_SECONDS
                 reason = "unknown_reset"
-                msg = f"usage limit reached; sleeping {wait_s}s before retry (no reset info)"
+                msg = (
+                    f"usage limit reached; "
+                    f"sleeping {wait_s}s before retry (no reset info)"
+                )
             logger.log(
                 "usage_limit_wait",
-                phase="impl",
-                spec=rel,
-                attempt=attempt,
-                wait_seconds=wait_s,
-                reset_seconds=reset,
-                reason=reason,
+                phase="impl", spec=rel,
+                attempt=attempt, wait_seconds=wait_s,
+                reset_seconds=reset, reason=reason,
             )
-            print_status("wait", msg, color="yellow", enabled=config.color_output)
+            print_status(
+                "wait", msg,
+                color="yellow", enabled=config.color_output,
+            )
             time.sleep(wait_s)
             attempt += 1
             continue
 
         if res.exit_code != 0:
-            logger.log("impl_nonzero_exit", spec=rel, attempt=attempt, exit_code=res.exit_code)
-            delay: float = backoff_delay(attempt)
-            logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="nonzero_exit")
+            logger.log(
+                "impl_nonzero_exit", spec=rel,
+                attempt=attempt, exit_code=res.exit_code,
+            )
+            delay = backoff_delay(attempt)
+            logger.log(
+                "backoff_wait", phase="impl", spec=rel,
+                attempt=attempt, wait_seconds=delay,
+                reason="nonzero_exit",
+            )
             print_status(
                 "wait",
-                f"codex exit {res.exit_code}; backing off {delay:.1f}s",
-                color="yellow",
-                enabled=config.color_output,
+                f"codex exit {res.exit_code}; "
+                f"backing off {delay:.1f}s",
+                color="yellow", enabled=config.color_output,
             )
             time.sleep(delay)
             attempt += 1
             continue
 
         if not ok or commit is None:
-            logger.log("impl_no_completion", spec=rel, attempt=attempt)
-            delay: float = backoff_delay(attempt)
-            logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="no_completion")
+            logger.log(
+                "impl_no_completion", spec=rel, attempt=attempt,
+            )
+            delay = backoff_delay(attempt)
+            logger.log(
+                "backoff_wait", phase="impl", spec=rel,
+                attempt=attempt, wait_seconds=delay,
+                reason="no_completion",
+            )
             print_status(
                 "retry",
-                f"impl completion contract not satisfied; backing off {delay:.1f}s",
-                color="yellow",
-                enabled=config.color_output,
+                f"impl completion contract not satisfied; "
+                f"backing off {delay:.1f}s",
+                color="yellow", enabled=config.color_output,
             )
             time.sleep(delay)
             attempt += 1
             continue
 
-        # Save/overwrite candidate
+        # Save candidate
         c = CandidateInfo(
             spec_rel=rel,
             spec_id=spec.spec_id,
@@ -1271,27 +1864,23 @@ def run_spec_pipeline(
             created_at_utc=datetime.now(timezone.utc).isoformat(),
             last_impl_run_dir=to_rel_posix(impl_run_dir, paths.ralph_home),
             last_verify_run_dir=None,
-            status="candidate",
+            status=CandidateStatus.CANDIDATE,
         )
         cpath = save_candidate(paths, c)
         logger.log(
             "candidate_written",
-            spec=rel,
-            attempt=attempt,
+            spec=rel, attempt=attempt,
             candidate_commit=commit,
             candidate_file=to_rel_posix(cpath, paths.ralph_home),
         )
         print_status(
             "candidate",
-            f"{rel} -> {commit[:8]} (saved {to_rel_posix(cpath, paths.ralph_home)})",
-            color="cyan",
-            enabled=config.color_output,
+            f"{rel} -> {commit[:8]} "
+            f"(saved {to_rel_posix(cpath, paths.ralph_home)})",
+            color="cyan", enabled=config.color_output,
         )
 
         # Verify candidate immediately
-        candidate = c
-        verified: bool
-        vout: str
         verified, vout = verify_candidate(
             spec=spec,
             paths=paths,
@@ -1299,27 +1888,59 @@ def run_spec_pipeline(
             logger=logger,
             candidate=c,
             attempt=attempt,
+            plan_content=plan_content,
         )
         if verified:
             done_set.add(rel)
             print_status(
                 "done",
                 f"{rel} (verified commit: {commit[:8]})",
-                color="green",
-                enabled=config.color_output,
+                color="green", enabled=config.color_output,
             )
             return SpecResult.COMPLETED
 
-        # Not verified: use verifier output tail as feedback for next impl attempt
+        # Check plan invalidation
+        inv_reason = parse_plan_invalidation(vout)
+        if inv_reason:
+            logger.log(
+                "plan_invalidated", spec=rel,
+                reason=inv_reason, attempt=attempt,
+            )
+            print_status(
+                "plan-invalid",
+                f"plan invalidated: {inv_reason}",
+                color="yellow", enabled=config.color_output,
+            )
+            invalidate_plan(paths, rel, inv_reason)
+            # Remove stale candidate so restart doesn't re-verify old commit
+            cpath_stale = candidate_path_for_spec(paths, rel)
+            if cpath_stale.exists():
+                cpath_stale.unlink()
+            candidate = None
+            verifier_feedback = None
+            delay = backoff_delay(attempt)
+            logger.log(
+                "backoff_wait", phase="plan", spec=rel,
+                attempt=attempt, wait_seconds=delay,
+                reason="plan_invalidated",
+            )
+            time.sleep(delay)
+            attempt += 1
+            continue
+
         verifier_feedback = output_tail(vout)
         candidate = None
-        delay: float = backoff_delay(attempt)
-        logger.log("backoff_wait", phase="impl", spec=rel, attempt=attempt, wait_seconds=delay, reason="verify_failed")
+        delay = backoff_delay(attempt)
+        logger.log(
+            "backoff_wait", phase="impl", spec=rel,
+            attempt=attempt, wait_seconds=delay,
+            reason="verify_failed",
+        )
         print_status(
             "retry",
-            f"verifier failed; backing off {delay:.1f}s before next implement attempt",
-            color="yellow",
-            enabled=config.color_output,
+            f"verifier failed; backing off {delay:.1f}s "
+            f"before next implement attempt",
+            color="yellow", enabled=config.color_output,
         )
         time.sleep(delay)
         attempt += 1
@@ -1328,8 +1949,7 @@ def run_spec_pipeline(
     print_status(
         "failed",
         f"max attempts exceeded for {rel}",
-        color="red",
-        enabled=config.color_output,
+        color="red", enabled=config.color_output,
     )
     return SpecResult.FAILED
 
@@ -1383,6 +2003,7 @@ def main() -> int:
     paths.candidates_root.mkdir(parents=True, exist_ok=True)
     paths.done_root.mkdir(parents=True, exist_ok=True)
     paths.sessions_root.mkdir(parents=True, exist_ok=True)
+    paths.plans_root.mkdir(parents=True, exist_ok=True)
     paths.runs_root.mkdir(parents=True, exist_ok=True)
 
     ensure_file(
@@ -1439,6 +2060,7 @@ def main() -> int:
         candidates_root=paths.candidates_root.as_posix(),
         done_root=paths.done_root.as_posix(),
         sessions_root=paths.sessions_root.as_posix(),
+        plans_root=paths.plans_root.as_posix(),
         runs_root=paths.runs_root.as_posix(),
         scratchpad=paths.scratchpad.as_posix(),
         magic_phrase=config.magic_phrase,

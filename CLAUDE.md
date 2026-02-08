@@ -33,18 +33,23 @@ python ralph/ralph.py --json-logs
 
 ## Architecture
 
-### Two-Phase Pipeline
+### Three-Phase Pipeline
 
-1. **Phase A (Implementer)**: Codex implements the spec, commits, and outputs:
+1. **Phase P (Planner)**: Codex reads the spec, explores the codebase (read-only), and writes a plan:
+   - Writes plan to `specs/plans/<spec>.md`
+   - Magic phrase: `I AM HYPER SURE I AM DONE!` (final line)
+
+2. **Phase A (Implementer)**: Codex implements the spec following the plan, commits, and outputs:
    - DONE REPORT
    - 40-char commit hash (own line)
    - Magic phrase: `I AM HYPER SURE I AM DONE!` (final line)
 
-2. **Phase B (Verifier)**: Independent Codex run validates the candidate commit:
+3. **Phase B (Verifier)**: Independent Codex run validates the candidate commit:
    - Reads spec and checks acceptance criteria
    - Runs targeted verification (fast-first)
    - Does NOT modify code
    - If verified, outputs same commit hash + magic phrase
+   - Can invalidate the plan via `PLAN_INVALIDATION:` marker if approach was wrong
 
 ### Directory Structure
 
@@ -56,11 +61,13 @@ ralph/
 ├── specs/
 │   ├── 0001-*.md      # Spec files (your backlog)
 │   ├── area/0002-*.md # Nested specs supported
+│   ├── plans/         # Implementation plans (.md + .json metadata)
 │   ├── candidates/    # Candidate completion markers (.json)
 │   ├── sessions/      # Saved Codex session ids per spec (.json)
 │   └── done/          # Verified completion markers (.md)
 └── runs/
     └── <spec_id>/<timestamp>/
+        ├── plan-attempt-*.log
         ├── impl-attempt-*.log
         └── verify.log
 ```
@@ -119,8 +126,11 @@ pytest webhooks/tests/test_delivery.py -v
 
 Safe to restart at any time:
 - Specs with `done/` marker are skipped
+- Specs with active `plans/` but no `candidates/` → skips planning, proceeds to implement
+- Specs with `plans/` status `"invalidated"` → re-plans with old plan + reason as context
 - Specs with `candidates/` but no `done/` marker → Ralph tries verification first
 - If verification fails → re-runs implementation with verifier feedback
+- If verification fails with `PLAN_INVALIDATION:` → archives plan, re-plans from scratch
 - Codex sessions are resumed per spec/phase when available; prompts ask the agent to compact context before continuing
 
 ## Defaults
