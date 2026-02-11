@@ -145,6 +145,7 @@ def run_planner(
     paths: Paths,
     config: Config,
     logger: Logger,
+    spec_content: str,
     previous_plan: str | None,
     invalidation_reason: str | None,
     attempt: int,
@@ -158,6 +159,7 @@ def run_planner(
         spec=spec,
         paths=paths,
         config=config,
+        spec_content=spec_content,
         previous_plan=previous_plan,
         invalidation_reason=invalidation_reason,
     )
@@ -267,6 +269,7 @@ def verify_candidate(
     paths: Paths,
     config: Config,
     logger: Logger,
+    spec_content: str,
     candidate: CandidateInfo,
     attempt: int,
     plan_content: str | None,
@@ -281,6 +284,7 @@ def verify_candidate(
         spec=spec,
         paths=paths,
         config=config,
+        spec_content=spec_content,
         candidate_commit=candidate.candidate_commit,
         plan_content=plan_content,
     )
@@ -433,6 +437,9 @@ def run_spec_pipeline(
         logger.log("spec_dry_run", spec=rel)
         return SpecResult.DRY_RUN
 
+    # Read spec content once — embedded in all prompts
+    spec_content: str = spec.spec_path.read_text(encoding="utf-8")
+
     verifier_feedback: str | None = None
     candidate: CandidateInfo | None = load_candidate(paths, rel)
 
@@ -473,6 +480,7 @@ def run_spec_pipeline(
                 paths=paths,
                 config=config,
                 logger=logger,
+                spec_content=spec_content,
                 previous_plan=previous_plan,
                 invalidation_reason=invalidation_reason,
                 attempt=attempt,
@@ -530,6 +538,7 @@ def run_spec_pipeline(
                 paths=paths,
                 config=config,
                 logger=logger,
+                spec_content=spec_content,
                 candidate=candidate,
                 attempt=attempt,
                 plan_content=plan_content,
@@ -590,6 +599,7 @@ def run_spec_pipeline(
             spec=spec,
             paths=paths,
             config=config,
+            spec_content=spec_content,
             verifier_feedback=verifier_feedback,
             plan_content=plan_content,
         )
@@ -740,6 +750,7 @@ def run_spec_pipeline(
             paths=paths,
             config=config,
             logger=logger,
+            spec_content=spec_content,
             candidate=c,
             attempt=attempt,
             plan_content=plan_content,
