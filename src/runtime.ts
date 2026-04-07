@@ -4,7 +4,14 @@ import { promises as fs } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { RuntimePaths, RunState, SpecDocument } from "./types.js";
+import type {
+  ImplementationReport,
+  ReviewFinding,
+  RuntimePaths,
+  RunState,
+  SpecDocument,
+  WorkflowProgressEvent,
+} from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -71,6 +78,35 @@ export async function saveArtifact(
   await fs.mkdir(dir, { recursive: true });
   const absolute = path.join(dir, `${name}.json`);
   await fs.writeFile(absolute, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return absolute;
+}
+
+export function runLogDirectory(paths: RuntimePaths, specId: string, runId: string): string {
+  return path.join(paths.runsRoot, specId, runId);
+}
+
+export function runEventLogPath(paths: RuntimePaths, specId: string, runId: string): string {
+  return path.join(runLogDirectory(paths, specId, runId), "events.log");
+}
+
+export function formatWorkflowProgressEvent(event: WorkflowProgressEvent): string {
+  const metadata = [`phase=${event.phase}`];
+  if (event.iteration !== undefined) {
+    metadata.push(`iteration=${event.iteration}`);
+  }
+  if (event.reviewer) {
+    metadata.push(`reviewer=${event.reviewer}`);
+  }
+  if (event.candidateCommit) {
+    metadata.push(`commit=${event.candidateCommit}`);
+  }
+  return `${event.timestamp} ${metadata.join(" ")} ${event.summary}`;
+}
+
+export async function appendRunEvent(paths: RuntimePaths, event: WorkflowProgressEvent): Promise<string> {
+  const absolute = runEventLogPath(paths, event.specId, event.runId);
+  await fs.mkdir(path.dirname(absolute), { recursive: true });
+  await fs.appendFile(absolute, `${formatWorkflowProgressEvent(event)}\n`, "utf8");
   return absolute;
 }
 
@@ -147,10 +183,33 @@ async function copyDirectory(source: string, destination: string): Promise<void>
   }
 }
 
+async function readGitStdout(worktreePath: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-C", worktreePath, ...args]);
+  return stdout.trim();
+}
+
+async function readGitLines(worktreePath: string, args: string[]): Promise<string[]> {
+  const output = await readGitStdout(worktreePath, args);
+  return output === "" ? [] : output.split(/\r?\n/);
+}
+
+async function ignoreWorktreePath(worktreePath: string, pattern: string): Promise<void> {
+  const excludePath = path.resolve(worktreePath, await readGitStdout(worktreePath, ["rev-parse", "--git-path", "info/exclude"]));
+  const current = await fs.readFile(excludePath, "utf8").catch(() => "");
+  const lines = current.split(/\r?\n/).filter((line) => line !== "");
+  if (lines.includes(pattern)) {
+    return;
+  }
+  await fs.mkdir(path.dirname(excludePath), { recursive: true });
+  const prefix = current === "" || current.endsWith("\n") ? current : `${current}\n`;
+  await fs.writeFile(excludePath, `${prefix}${pattern}\n`, "utf8");
+}
+
 export async function installWorktreeCodexSupport(paths: RuntimePaths, worktreePath: string): Promise<void> {
   const source = path.join(paths.projectRoot, "codex-support");
   const dest = path.join(worktreePath, ".codex");
   await copyDirectory(source, dest);
+  await ignoreWorktreePath(worktreePath, ".codex/");
 }
 
 export async function ensureSpecWorktree(
@@ -217,10 +276,76 @@ export function defaultCodexHome(paths: RuntimePaths): string {
   return path.join(paths.ralphRoot, "codex-home");
 }
 
+function sourceCodexHome(): string {
+  return process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(os.homedir(), ".codex");
+}
+
 export async function ensureCodexHome(paths: RuntimePaths): Promise<string> {
   const codexHome = defaultCodexHome(paths);
   await fs.mkdir(codexHome, { recursive: true });
+  const externalCodexHome = sourceCodexHome();
+  if (path.resolve(externalCodexHome) !== path.resolve(codexHome)) {
+    for (const fileName of ["auth.json", "config.toml"]) {
+      const source = path.join(externalCodexHome, fileName);
+      const destination = path.join(codexHome, fileName);
+      if ((await pathExists(source)) && !(await pathExists(destination))) {
+        await fs.copyFile(source, destination);
+      }
+    }
+  }
   return codexHome;
+}
+
+export async function worktreeAdditionalDirectories(worktreePath: string): Promise<string[]> {
+  const gitDir = path.resolve(worktreePath, await readGitStdout(worktreePath, ["rev-parse", "--git-dir"]));
+  const commonDir = path.resolve(worktreePath, await readGitStdout(worktreePath, ["rev-parse", "--git-common-dir"]));
+  return [...new Set([gitDir, commonDir])];
+}
+
+export async function validateImplementationCandidate(
+  worktreePath: string,
+  report: ImplementationReport,
+): Promise<ReviewFinding | null> {
+  const problems: string[] = [];
+  let commitExists = false;
+  try {
+    await execFileAsync("git", ["-C", worktreePath, "rev-parse", "--verify", `${report.commitHash}^{commit}`]);
+    commitExists = true;
+  } catch {
+    problems.push(`Reported commit ${report.commitHash} does not exist as a local commit.`);
+  }
+
+  const headCommit = await readGitStdout(worktreePath, ["rev-parse", "HEAD"]);
+  if (headCommit !== report.commitHash) {
+    problems.push(`HEAD is ${headCommit}, not the reported commit ${report.commitHash}.`);
+  }
+
+  if (commitExists) {
+    const committedFiles = [...new Set(await readGitLines(worktreePath, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", report.commitHash]))].sort();
+    const reportedFiles = [...new Set(report.changedFiles)].sort();
+    if (committedFiles.join("\n") !== reportedFiles.join("\n")) {
+      problems.push(
+        `Reported changed files ${reportedFiles.join(", ") || "(none)"} do not match committed files ${committedFiles.join(", ") || "(none)"}.`,
+      );
+    }
+  }
+
+  const dirtyEntries = await readGitLines(worktreePath, ["status", "--short"]);
+  if (dirtyEntries.length > 0) {
+    problems.push(`Worktree is not clean after the reported commit: ${dirtyEntries.join(" | ")}.`);
+  }
+
+  if (problems.length === 0) {
+    return null;
+  }
+
+  return {
+    severity: "error",
+    category: "correctness",
+    title: "Reported candidate commit does not match repository state",
+    detail: problems.join(" "),
+    action: "Create and check out a real commit for the implemented changes, leave the worktree clean, and then report that exact commit hash.",
+  };
 }
 
 export async function listRunStates(paths: RuntimePaths): Promise<RunState[]> {

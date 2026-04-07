@@ -90,6 +90,28 @@ export interface RunState {
   legacyDoneDetected: boolean;
 }
 
+export type WorkflowProgressPhase =
+  | "setup"
+  | "planning"
+  | "implementing"
+  | "reviewing"
+  | "rechecking"
+  | "dry-run"
+  | "done"
+  | "failed";
+
+export interface WorkflowProgressEvent {
+  timestamp: string;
+  runId: string;
+  specId: string;
+  specTitle: string;
+  phase: WorkflowProgressPhase;
+  iteration?: number;
+  summary: string;
+  reviewer?: ReviewerReport["reviewer"];
+  candidateCommit?: string;
+}
+
 export interface AgentRunArtifact<TPayload> {
   role: RoleName;
   turnId: string;
@@ -176,6 +198,7 @@ export interface RoleExecutionOptions {
   role: RoleName;
   model: string;
   workingDirectory: string;
+  additionalDirectories?: string[];
   sandboxMode: SandboxMode;
   approvalPolicy: ApprovalMode;
   reasoningEffort: ModelReasoningEffort;

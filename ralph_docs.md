@@ -83,6 +83,7 @@ Responsible for:
 - building `.ralph/` paths
 - loading and saving run state
 - writing artifacts and done reports
+- writing per-run progress logs under `.ralph/runs/`
 - resolving repository paths from workspace-relative spec metadata
 - creating and reusing git worktrees
 - copying `codex-support/` into the worktree as `.codex/`
@@ -108,6 +109,7 @@ It:
 - enforces structured outputs with schemas
 - persists thread ids in run state
 - writes structured JSON artifacts for each turn
+- emits progress events for terminal streaming and `.ralph/runs/.../events.log`
 - loops review/recheck iterations
 - writes the final done report on success
 
@@ -135,12 +137,14 @@ The active runtime root is `.ralph/`.
   The authoritative per-spec state file.
 - `.ralph/artifacts/<spec-id>/<run-id>/`
   Structured outputs from every role, plus human-readable understanding artifacts.
+- `.ralph/runs/<spec-id>/<run-id>/events.log`
+  Human-readable progress log for the streamed workflow phases.
 - `.ralph/reports/done/<spec-id>.md`
   Final success report.
 - `.ralph/worktrees/<spec-id>/`
   The isolated git worktree for the spec.
 
-`runs/` and `sessions/` already exist as part of the runtime structure even though the current implementation does not yet use them heavily.
+`sessions/` still exists as part of the runtime structure, while `runs/` now stores per-run progress logs.
 
 ## Spec Contract
 
@@ -285,6 +289,8 @@ node dist/src/cli.js run 1001-demo
 ```bash
 node dist/src/cli.js run --dry-run
 ```
+
+During `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/3 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
 
 ### Status
 

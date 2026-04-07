@@ -75,6 +75,8 @@ For local development without building first:
 node --import tsx ./src/cli.ts run
 ```
 
+`run` streams per-spec progress to the terminal with `[current/total]` prefixes, phase changes, and a per-run log path under `.ralph/runs/<spec-id>/<run-id>/events.log`.
+
 ## Requirements
 
 - Node.js 20+
@@ -96,7 +98,7 @@ ralph/
 │   │   └── done/            # Final done reports
 │   ├── state/               # Per-spec run state JSON
 │   ├── sessions/            # Reserved runtime area
-│   ├── runs/                # Reserved runtime area
+│   ├── runs/                # Per-run terminal/event logs
 │   └── worktrees/           # One isolated worktree per spec
 ├── README.md
 └── ralph_docs.md
@@ -189,6 +191,8 @@ Important outputs:
   Current run state, threads, last commit, status, and iteration count.
 - `.ralph/artifacts/<spec-id>/<run-id>/`
   Structured JSON outputs and human-readable artifacts from each agent turn.
+- `.ralph/runs/<spec-id>/<run-id>/events.log`
+  Human-readable per-run progress log matching the streamed terminal phases.
 - `.ralph/reports/done/<spec-id>.md`
   Final completion report for a successful spec.
 - `.ralph/worktrees/<spec-id>/`

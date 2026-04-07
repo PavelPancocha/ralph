@@ -4,9 +4,9 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-import type { RalphRunOptions } from "./types.js";
+import type { RalphRunOptions, SupervisorOutcome, WorkflowProgressEvent } from "./types.js";
 import { executeSpec } from "./workflow.js";
-import { buildRuntimePaths, defaultWorkspaceRoot, ensureRuntimePaths, listRunStates, runtimeSummary } from "./runtime.js";
+import { buildRuntimePaths, defaultWorkspaceRoot, ensureRuntimePaths, listRunStates, runEventLogPath, runtimeSummary } from "./runtime.js";
 import { createSampleSpecFile, discoverSpecPaths, parseSpecFile } from "./specs.js";
 
 export interface ParsedArgs {
@@ -19,6 +19,30 @@ export interface ParsedArgs {
   inspectTarget: string | undefined;
   createSpecTarget: string | undefined;
   parseError?: string;
+}
+
+export interface CommandDependencies {
+  executeSpec?: typeof executeSpec;
+}
+
+export function formatProgressLine(
+  event: WorkflowProgressEvent,
+  specIndex: number,
+  specCount: number,
+  maxIterations: number,
+): string {
+  const parts = [`[${specIndex}/${specCount}]`, event.phase.padEnd(12)];
+  if (event.iteration) {
+    parts.push(`iter ${event.iteration}/${maxIterations}`);
+  }
+  if (event.reviewer) {
+    parts.push(`${event.reviewer} reviewer:`);
+  }
+  parts.push(event.summary);
+  if (event.candidateCommit) {
+    parts.push(`[${event.candidateCommit.slice(0, 12)}]`);
+  }
+  return parts.join(" ");
 }
 
 function looksLikeSpecFilter(token: string): boolean {
@@ -94,7 +118,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return args;
 }
 
-export async function runCommand(parsed: ParsedArgs): Promise<number> {
+export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies = {}): Promise<number> {
   if (parsed.parseError) {
     console.error(`${parsed.parseError}. Use one of: run, status, inspect, create-spec.`);
     return 1;
@@ -159,16 +183,29 @@ export async function runCommand(parsed: ParsedArgs): Promise<number> {
     dryRun: parsed.dryRun,
     specFilters: parsed.specFilters,
   };
+  const executeSpecFn = deps.executeSpec ?? executeSpec;
 
   let failures = 0;
-  for (const relSpec of selected) {
+  console.log(`Running ${selected.length} spec(s) with model=${parsed.model} maxIterations=${parsed.maxIterations}`);
+  for (const [index, relSpec] of selected.entries()) {
     const spec = await parseSpecFile(projectRoot, workspaceRoot, relSpec);
-    console.log(`\n=== ${spec.specId} :: ${spec.title} ===`);
+    const specIndex = index + 1;
+    console.log(`\n[${specIndex}/${selected.length}] ${spec.specId} :: ${spec.title}`);
+    let printedLogPath = false;
     try {
-      const outcome = await executeSpec(paths, options, spec);
-      console.log(`${outcome.status.toUpperCase()}: ${outcome.summary}`);
+      const outcome = await executeSpecFn(paths, options, spec, {
+        onProgress: (event): void => {
+          if (!printedLogPath) {
+            const logPath = runEventLogPath(paths, spec.specId, event.runId);
+            console.log(`[${specIndex}/${selected.length}] logs         ${path.relative(projectRoot, logPath).replaceAll(path.sep, "/")}`);
+            printedLogPath = true;
+          }
+          console.log(formatProgressLine(event, specIndex, selected.length, parsed.maxIterations));
+        },
+      });
+      console.log(`[${specIndex}/${selected.length}] ${outcome.status.toUpperCase()}: ${outcome.summary}`);
       if (outcome.candidateCommit) {
-        console.log(`commit: ${outcome.candidateCommit}`);
+        console.log(`[${specIndex}/${selected.length}] commit: ${outcome.candidateCommit}`);
       }
       if (outcome.status === "failed") {
         failures += 1;
@@ -176,7 +213,7 @@ export async function runCommand(parsed: ParsedArgs): Promise<number> {
     } catch (error) {
       failures += 1;
       const message = error instanceof Error ? error.stack ?? error.message : String(error);
-      console.error(`FAILED: ${message}`);
+      console.error(`[${specIndex}/${selected.length}] FAILED: ${message}`);
     }
   }
 

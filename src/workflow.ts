@@ -18,6 +18,7 @@ import type {
   SupervisorOutcome,
   SupervisorStrategy,
   UnderstandingPacket,
+  WorkflowProgressEvent,
 } from "./types.js";
 import {
   buildSupervisorFinalPrompt,
@@ -28,6 +29,7 @@ import {
   buildUnderstanderPrompt,
 } from "./prompts.js";
 import {
+  appendRunEvent,
   createRunId,
   ensureCodexHome,
   ensureSpecWorktree,
@@ -38,6 +40,8 @@ import {
   saveArtifact,
   saveDoneReport,
   saveRunState,
+  validateImplementationCandidate,
+  worktreeAdditionalDirectories,
 } from "./runtime.js";
 
 const supervisorStrategySchema = z.object({
@@ -95,7 +99,7 @@ const recheckVerdictSchema = z.object({
 const supervisorOutcomeSchema = z.object({
   status: z.enum(["done", "needs_more_work", "failed"]),
   summary: z.string(),
-  candidateCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+  candidateCommit: z.string().regex(/^[0-9a-f]{40}$/),
   nextAction: z.string(),
 });
 
@@ -240,7 +244,7 @@ const supervisorOutcomeOutputSchema: StructuredOutputSchema<SupervisorOutcome> =
       candidateCommit: { type: "string", pattern: "^[0-9a-f]{40}$" },
       nextAction: { type: "string" },
     },
-    required: ["status", "summary", "nextAction"],
+    required: ["status", "summary", "candidateCommit", "nextAction"],
     additionalProperties: false,
   },
 };
@@ -271,6 +275,11 @@ interface CodexLike {
 
 export interface WorkflowDependencies {
   createCodex?: (paths: RuntimePaths, model: string) => CodexLike;
+  validateImplementationCandidate?: (
+    worktreePath: string,
+    report: ImplementationReport,
+  ) => Promise<ReviewFinding | null>;
+  onProgress?: (event: WorkflowProgressEvent) => void | Promise<void>;
 }
 
 function createCodex(paths: RuntimePaths, model: string): CodexLike {
@@ -295,6 +304,7 @@ function roleThreadOptions(options: RoleExecutionOptions): CodexThreadConfig {
     model: options.model,
     modelReasoningEffort: options.reasoningEffort,
     workingDirectory: options.workingDirectory,
+    ...(options.additionalDirectories ? { additionalDirectories: options.additionalDirectories } : {}),
     sandboxMode: options.sandboxMode,
     approvalPolicy: options.approvalPolicy,
     skipGitRepoCheck: false,
@@ -371,7 +381,12 @@ function implementationPromptFixes(findings: ReviewFinding[]): string[] {
   return findings.map((finding) => `${finding.category}: ${finding.action}`);
 }
 
-function reviewerRoleOptions(worktreePath: string, model: string, role: ReviewerReport["reviewer"]): RoleExecutionOptions {
+function reviewerRoleOptions(
+  worktreePath: string,
+  model: string,
+  role: ReviewerReport["reviewer"],
+  additionalDirectories: string[],
+): RoleExecutionOptions {
   const roleMap: Record<ReviewerReport["reviewer"], RoleExecutionOptions["role"]> = {
     correctness: "reviewer_correctness",
     tests: "reviewer_tests",
@@ -382,6 +397,7 @@ function reviewerRoleOptions(worktreePath: string, model: string, role: Reviewer
     role: roleMap[role],
     model,
     workingDirectory: worktreePath,
+    additionalDirectories,
     sandboxMode: "read-only",
     approvalPolicy: "never",
     reasoningEffort: "high",
@@ -398,6 +414,24 @@ async function writeHumanArtifact(
   const dir = path.join(paths.artifactsRoot, specId, runId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, filename), content, "utf8");
+}
+
+async function emitProgress(
+  paths: RuntimePaths,
+  spec: SpecDocument,
+  runId: string,
+  deps: WorkflowDependencies,
+  event: Omit<WorkflowProgressEvent, "timestamp" | "runId" | "specId" | "specTitle">,
+): Promise<void> {
+  const progressEvent: WorkflowProgressEvent = {
+    timestamp: new Date().toISOString(),
+    runId,
+    specId: spec.specId,
+    specTitle: spec.title,
+    ...event,
+  };
+  await appendRunEvent(paths, progressEvent);
+  await deps.onProgress?.(progressEvent);
 }
 
 export async function executeSpec(
@@ -425,8 +459,13 @@ export async function executeSpec(
   state.runId = runId;
   state.updatedAt = new Date().toISOString();
   const worktreePath = await ensureSpecWorktree(paths, spec, repoPath);
+  const additionalDirectories = await worktreeAdditionalDirectories(worktreePath);
   state.worktreePath = worktreePath;
   await saveRunState(paths, state);
+  await emitProgress(paths, spec, runId, deps, {
+    phase: "setup",
+    summary: `worktree ready at ${worktreePath}`,
+  });
 
   if (options.dryRun) {
     const dryOutcome: SupervisorOutcome = {
@@ -436,27 +475,37 @@ export async function executeSpec(
       nextAction: "Run without --dry-run to execute the workflow.",
     };
     await saveArtifact(paths, spec.specId, runId, "dry-run", { spec, worktreePath, repoPath });
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "dry-run",
+      summary: `prepared worktree at ${worktreePath}`,
+    });
     return dryOutcome;
   }
 
   const codexFactory = deps.createCodex ?? createCodex;
+  const implementationCandidateValidator = deps.validateImplementationCandidate ?? validateImplementationCandidate;
   const codex = codexFactory(paths, options.model);
 
   state.status = "planning";
   await saveRunState(paths, state);
+  await emitProgress(paths, spec, runId, deps, {
+    phase: "planning",
+    summary: "running supervisor strategy",
+  });
   const supervisorStrategy = await runStructuredTurn(
     codex,
     paths,
     spec,
     state,
     runId,
-    {
-      role: "supervisor",
-      model: options.model,
-      workingDirectory: worktreePath,
-      sandboxMode: "read-only",
-      approvalPolicy: "never",
-      reasoningEffort: "high",
+      {
+        role: "supervisor",
+        model: options.model,
+        workingDirectory: worktreePath,
+        additionalDirectories,
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+        reasoningEffort: "high",
     },
     supervisorStrategyOutputSchema,
     buildSupervisorPrompt(spec, worktreePath),
@@ -473,6 +522,11 @@ export async function executeSpec(
     state.currentIteration = iteration;
     state.status = "planning";
     await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "planning",
+      iteration,
+      summary: "building understanding packet",
+    });
 
     const understanding = await runStructuredTurn(
       codex,
@@ -484,6 +538,7 @@ export async function executeSpec(
         role: "understander",
         model: options.model,
         workingDirectory: worktreePath,
+        additionalDirectories,
         sandboxMode: "read-only",
         approvalPolicy: "never",
         reasoningEffort: "high",
@@ -513,6 +568,11 @@ export async function executeSpec(
 
     state.status = "implementing";
     await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "implementing",
+      iteration,
+      summary: "running implementer",
+    });
     const implementation = await runStructuredTurn(
       codex,
       paths,
@@ -523,6 +583,7 @@ export async function executeSpec(
         role: "implementer",
         model: options.model,
         workingDirectory: worktreePath,
+        additionalDirectories,
         sandboxMode: "workspace-write",
         approvalPolicy: "never",
         reasoningEffort: "medium",
@@ -531,20 +592,50 @@ export async function executeSpec(
       buildImplementerPrompt(spec, understanding.output, worktreePath, implementationPromptFixes(acceptedFindings)),
     );
     implementationReport = implementation.output;
+    const implementationValidation = await implementationCandidateValidator(worktreePath, implementation.output);
+    if (implementationValidation) {
+      acceptedFindings = [...acceptedFindings, implementationValidation];
+      state.lastCommit = undefined;
+      state.lastError = implementationValidation.detail;
+      state.status = "planning";
+      await saveRunState(paths, state);
+      await saveArtifact(paths, spec.specId, runId, `implementation-validation-${iteration}`, {
+        report: implementation.output,
+        finding: implementationValidation,
+      });
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "planning",
+        iteration,
+        summary: `candidate validation failed: ${implementationValidation.detail}`,
+      });
+      continue;
+    }
     state.lastCommit = implementation.output.commitHash;
     await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "implementing",
+      iteration,
+      summary: "candidate commit validated",
+      candidateCommit: implementation.output.commitHash,
+    });
 
     state.status = "reviewing";
     await saveRunState(paths, state);
     const reviewerOutputs: ReviewerReport[] = [];
     for (const reviewer of plannedReviewerRoles) {
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "reviewing",
+        iteration,
+        reviewer,
+        summary: `running ${reviewer} reviewer`,
+      });
       const reviewerReport = await runStructuredTurn(
         codex,
         paths,
         spec,
         state,
         runId,
-        reviewerRoleOptions(worktreePath, options.model, reviewer),
+        reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories),
         reviewerReportOutputSchema,
         buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath),
       );
@@ -558,6 +649,11 @@ export async function executeSpec(
 
     state.status = "rechecking";
     await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "rechecking",
+      iteration,
+      summary: "running recheck verdict",
+    });
     const recheck = await runStructuredTurn(
       codex,
       paths,
@@ -568,6 +664,7 @@ export async function executeSpec(
         role: "recheck",
         model: options.model,
         workingDirectory: worktreePath,
+        additionalDirectories,
         sandboxMode: "read-only",
         approvalPolicy: "never",
         reasoningEffort: "high",
@@ -591,8 +688,18 @@ export async function executeSpec(
       state.threads.reviewerSecurity = undefined;
       state.threads.reviewerPerformance = undefined;
       state.threads.recheck = undefined;
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "planning",
+        iteration,
+        summary: `plan invalidated: ${recheck.output.summary}`,
+      });
       continue;
     }
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "planning",
+      iteration,
+      summary: `continuing with fixes: ${recheck.output.summary}`,
+    });
   }
 
   if (!understandingPacket || !implementationReport || !recheckVerdict) {
@@ -602,9 +709,28 @@ export async function executeSpec(
       candidateCommit: undefined,
       nextAction: "Inspect .ralph artifacts and rerun.",
     };
+    if (state.lastError) {
+      failed.summary = state.lastError;
+    }
     state.status = "failed";
     state.lastError = failed.summary;
     await saveRunState(paths, state);
+    await emitProgress(
+      paths,
+      spec,
+      runId,
+      deps,
+      state.currentIteration > 0
+        ? {
+            phase: "failed",
+            iteration: state.currentIteration,
+            summary: failed.summary,
+          }
+        : {
+            phase: "failed",
+            summary: failed.summary,
+          },
+    );
     return failed;
   }
 
@@ -612,6 +738,12 @@ export async function executeSpec(
     state.status = "failed";
     state.lastError = recheckVerdict.summary;
     await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "failed",
+      iteration: state.currentIteration,
+      summary: recheckVerdict.summary,
+      candidateCommit: implementationReport.commitHash,
+    });
     return {
       status: "failed",
       summary: recheckVerdict.summary,
@@ -620,6 +752,12 @@ export async function executeSpec(
     };
   }
 
+  await emitProgress(paths, spec, runId, deps, {
+    phase: "rechecking",
+    iteration: state.currentIteration,
+    summary: "running supervisor final decision",
+    candidateCommit: implementationReport.commitHash,
+  });
   const supervisorFinal = await runStructuredTurn(
     codex,
     paths,
@@ -630,6 +768,7 @@ export async function executeSpec(
       role: "supervisor",
       model: options.model,
       workingDirectory: worktreePath,
+      additionalDirectories,
       sandboxMode: "read-only",
       approvalPolicy: "never",
       reasoningEffort: "high",
@@ -642,6 +781,12 @@ export async function executeSpec(
     state.status = "failed";
     state.lastError = supervisorFinal.output.summary;
     await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "failed",
+      iteration: state.currentIteration,
+      summary: supervisorFinal.output.summary,
+      candidateCommit: implementationReport.commitHash,
+    });
     return {
       status: "failed",
       summary: supervisorFinal.output.summary,
@@ -654,6 +799,12 @@ export async function executeSpec(
   state.status = "done";
   state.lastCommit = implementationReport.commitHash;
   await saveRunState(paths, state);
+  await emitProgress(paths, spec, runId, deps, {
+    phase: "done",
+    iteration: state.currentIteration,
+    summary: supervisorFinal.output.summary,
+    candidateCommit: implementationReport.commitHash,
+  });
   return {
     status: "done",
     summary: supervisorFinal.output.summary,

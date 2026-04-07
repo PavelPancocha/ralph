@@ -6,6 +6,33 @@ import { promises as fs } from "node:fs";
 
 import { parseArgs, runCommand } from "../src/cli.js";
 
+async function writeRunnableSpec(projectRoot: string, relativePath: string, title: string): Promise<void> {
+  const absolute = path.join(projectRoot, "specs", relativePath);
+  await fs.mkdir(path.dirname(absolute), { recursive: true });
+  await fs.writeFile(
+    absolute,
+    `# ${title}
+
+Repo: demo-repo
+Workdir: demo-repo
+
+## Branch Instructions
+- Source branch: \`dev\`
+- Create branch: \`feature/${path.basename(relativePath, ".md")}\`
+- PR target: \`dev\`
+
+## Goal
+Stream progress output.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+}
+
 test("parseArgs keeps the first positional token as a run filter when the subcommand is omitted", () => {
   const parsed = parseArgs(["1001-demo", "--dry-run", "--max-iterations", "5"]);
 
@@ -104,4 +131,74 @@ test("create-spec scaffolds a spec with required and recommended sections", asyn
   assert.match(created, /^## Scope \(In\)$/m);
   assert.match(created, /^## Boundaries \(Out, No Overlap\)$/m);
   assert.match(created, /^## Commit Requirements$/m);
+});
+
+test("runCommand streams spec-indexed progress lines and log paths during run", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-run-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+  await writeRunnableSpec(tempRoot, "1002-two.md", "1002 - Two");
+
+  let logOutput = "";
+  const originalLog = console.log;
+  const previousCwd = process.cwd();
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: [],
+        workspaceRoot: tempRoot,
+        model: "gpt-5.3-codex",
+        maxIterations: 3,
+        dryRun: false,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+      },
+      {
+        executeSpec: async (_paths, _options, spec, deps) => {
+          const runId = `${spec.specId}-run`;
+          await deps?.onProgress?.({
+            timestamp: new Date("2026-04-07T09:00:00.000Z").toISOString(),
+            runId,
+            specId: spec.specId,
+            specTitle: spec.title,
+            phase: "setup",
+            summary: `worktree ready at /tmp/${spec.specId}`,
+          });
+          await deps?.onProgress?.({
+            timestamp: new Date("2026-04-07T09:00:01.000Z").toISOString(),
+            runId,
+            specId: spec.specId,
+            specTitle: spec.title,
+            phase: "implementing",
+            iteration: 1,
+            summary: "candidate commit validated",
+            candidateCommit: "1234567890abcdef1234567890abcdef12345678",
+          });
+          return {
+            status: "done",
+            summary: `Completed ${spec.specId}.`,
+            candidateCommit: "1234567890abcdef1234567890abcdef12345678",
+            nextAction: "none",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+    console.log = originalLog;
+  }
+
+  assert.match(logOutput, /Running 2 spec\(s\) with model=gpt-5\.3-codex maxIterations=3/);
+  assert.match(logOutput, /\[1\/2\] 1001-one :: 1001 - One/);
+  assert.match(logOutput, /\[1\/2\] logs\s+\.ralph\/runs\/1001-one\/1001-one-run\/events\.log/);
+  assert.match(logOutput, /\[1\/2\] setup\s+worktree ready at \/tmp\/1001-one/);
+  assert.match(logOutput, /\[1\/2\] implementing\s+iter 1\/3\s+candidate commit validated \[1234567890ab\]/);
+  assert.match(logOutput, /\[2\/2\] 1002-two :: 1002 - Two/);
+  assert.match(logOutput, /DONE: Completed 1002-two\./);
 });

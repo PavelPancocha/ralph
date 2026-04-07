@@ -6,10 +6,10 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { promises as fs } from "node:fs";
 
-import { buildRuntimePaths, ensureRuntimePaths, readJsonFile } from "../src/runtime.js";
+import { buildRuntimePaths, ensureRuntimePaths, readJsonFile, runEventLogPath } from "../src/runtime.js";
 import { parseSpecFile } from "../src/specs.js";
 import { executeSpec } from "../src/workflow.js";
-import type { RalphRunOptions, RunState, RuntimePaths } from "../src/types.js";
+import type { CodexThreadConfig, RalphRunOptions, RunState, RuntimePaths, WorkflowProgressEvent } from "../src/types.js";
 
 const execFile = promisify(execFileCb);
 
@@ -17,11 +17,26 @@ class FakeThread {
   constructor(
     public id: string | null,
     private readonly finalResponse: string,
-    private readonly onRun: (threadId: string | null, prompt: string) => void,
+    private readonly onRun: (threadId: string | null, prompt: string, outputSchema?: unknown) => void,
   ) {}
 
-  async run(prompt: string, _options?: unknown) {
-    this.onRun(this.id, prompt);
+  async run(prompt: string, options?: { outputSchema?: unknown }) {
+    const schema = options?.outputSchema;
+    if (schema && typeof schema === "object" && !Array.isArray(schema)) {
+      const objectSchema = schema as {
+        type?: unknown;
+        properties?: Record<string, unknown>;
+        required?: unknown;
+      };
+      if (objectSchema.type === "object" && objectSchema.properties) {
+        assert.ok(Array.isArray(objectSchema.required), "Output schema must declare required fields.");
+        const required = new Set(objectSchema.required);
+        for (const propertyName of Object.keys(objectSchema.properties)) {
+          assert.ok(required.has(propertyName), `Output schema must require property ${propertyName}.`);
+        }
+      }
+    }
+    this.onRun(this.id, prompt, schema);
     return {
       finalResponse: this.finalResponse,
       items: [],
@@ -38,14 +53,15 @@ class FakeCodex {
   private readonly responses: string[];
   private readonly threadIds: Array<string | null>;
   private nextThreadIndex = 0;
-  public readonly prompts: Array<{ threadId: string | null; prompt: string }> = [];
+  public readonly prompts: Array<{ threadId: string | null; prompt: string; outputSchema?: unknown }> = [];
+  public readonly threadConfigs: Array<{ method: "start" | "resume"; threadId: string | null; options?: CodexThreadConfig }> = [];
 
   constructor(responses: string[], threadIds: Array<string | null> = []) {
     this.responses = [...responses];
     this.threadIds = [...threadIds];
   }
 
-  startThread() {
+  startThread(options?: CodexThreadConfig) {
     const response = this.responses.shift();
     if (!response) {
       throw new Error("No fake response queued for startThread");
@@ -55,20 +71,33 @@ class FakeCodex {
     if (queuedThreadId === undefined) {
       this.nextThreadIndex += 1;
     }
-    return new FakeThread(threadId, response, (nextThreadId, prompt) => {
-      this.prompts.push({ threadId: nextThreadId, prompt });
+    this.threadConfigs.push(options ? { method: "start", threadId, options } : { method: "start", threadId });
+    return new FakeThread(threadId, response, (nextThreadId, prompt, outputSchema) => {
+      this.prompts.push({ threadId: nextThreadId, prompt, outputSchema });
     });
   }
 
-  resumeThread(id: string) {
+  resumeThread(id: string, options?: CodexThreadConfig) {
     const response = this.responses.shift();
     if (!response) {
       throw new Error("No fake response queued for resumeThread");
     }
-    return new FakeThread(id, response, (nextThreadId, prompt) => {
-      this.prompts.push({ threadId: nextThreadId, prompt });
+    this.threadConfigs.push(options ? { method: "resume", threadId: id, options } : { method: "resume", threadId: id });
+    return new FakeThread(id, response, (nextThreadId, prompt, outputSchema) => {
+      this.prompts.push({ threadId: nextThreadId, prompt, outputSchema });
     });
   }
+}
+
+function fakeWorkflowDeps(
+  fakeCodex: FakeCodex,
+  overrides: { onProgress?: (event: WorkflowProgressEvent) => void | Promise<void> } = {},
+) {
+  return {
+    createCodex: () => fakeCodex,
+    validateImplementationCandidate: async () => null,
+    ...overrides,
+  };
 }
 
 async function createTempProject(): Promise<{
@@ -147,6 +176,7 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const commitHash = "1234567890abcdef1234567890abcdef12345678";
+  const progressEvents: WorkflowProgressEvent[] = [];
 
   const fakeCodex = new FakeCodex([
     JSON.stringify({
@@ -211,16 +241,47 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
     specFilters: [],
   };
 
-  const outcome = await executeSpec(paths, options, spec, {
-    createCodex: () => fakeCodex,
-  });
+  const outcome = await executeSpec(
+    paths,
+    options,
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+    }),
+  );
 
   assert.equal(outcome.status, "done");
   assert.equal(outcome.candidateCommit, commitHash);
+  const implementerThread = fakeCodex.threadConfigs[2];
+  assert.deepEqual(
+    implementerThread?.options?.additionalDirectories?.sort(),
+    [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)].sort(),
+  );
 
   const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
   assert.equal(state.status, "done");
   assert.equal(state.lastCommit, commitHash);
+  assert.deepEqual(
+    progressEvents.map((event) => [event.phase, event.summary]),
+    [
+      ["setup", `worktree ready at ${expectedWorktreePath}`],
+      ["planning", "running supervisor strategy"],
+      ["planning", "building understanding packet"],
+      ["implementing", "running implementer"],
+      ["implementing", "candidate commit validated"],
+      ["reviewing", "running correctness reviewer"],
+      ["reviewing", "running tests reviewer"],
+      ["rechecking", "running recheck verdict"],
+      ["rechecking", "running supervisor final decision"],
+      ["done", "Spec completed successfully."],
+    ],
+  );
+  const eventLog = await fs.readFile(runEventLogPath(paths, spec.specId, progressEvents[0]?.runId ?? ""), "utf8");
+  assert.match(eventLog, /phase=setup .*worktree ready/);
+  assert.match(eventLog, /phase=reviewing iteration=1 reviewer=correctness running correctness reviewer/);
+  assert.match(eventLog, new RegExp(`phase=done iteration=1 commit=${commitHash} Spec completed successfully\\.`));
 
   const doneReport = await fs.readFile(path.join(paths.reportsRoot, "done", `${spec.specId}.md`), "utf8");
   assert.match(doneReport, /Spec completed successfully\./);
@@ -302,9 +363,7 @@ test("executeSpec always includes correctness and tests reviewers when the super
     specFilters: [],
   };
 
-  const outcome = await executeSpec(paths, options, spec, {
-    createCodex: () => fakeCodex,
-  });
+  const outcome = await executeSpec(paths, options, spec, fakeWorkflowDeps(fakeCodex));
 
   assert.equal(outcome.status, "done");
 
@@ -440,9 +499,7 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
     specFilters: [],
   };
 
-  const outcome = await executeSpec(paths, options, spec, {
-    createCodex: () => fakeCodex,
-  });
+  const outcome = await executeSpec(paths, options, spec, fakeWorkflowDeps(fakeCodex));
 
   assert.equal(outcome.status, "done");
 
@@ -584,9 +641,7 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
     specFilters: [],
   };
 
-  const outcome = await executeSpec(paths, options, spec, {
-    createCodex: () => fakeCodex,
-  });
+  const outcome = await executeSpec(paths, options, spec, fakeWorkflowDeps(fakeCodex));
 
   assert.equal(outcome.status, "done");
 
@@ -621,7 +676,7 @@ test("executeSpec returns early for dry runs without starting agent threads", as
       specFilters: [],
     },
     spec,
-    { createCodex: () => fakeCodex },
+    fakeWorkflowDeps(fakeCodex),
   );
 
   assert.equal(outcome.status, "needs_more_work");
@@ -651,7 +706,7 @@ test("executeSpec skips specs with a legacy done marker before starting any agen
       specFilters: [],
     },
     spec,
-    { createCodex: () => fakeCodex },
+    fakeWorkflowDeps(fakeCodex),
   );
 
   assert.equal(outcome.status, "done");
@@ -741,7 +796,7 @@ test("executeSpec fails after maxIterations is exhausted on needs_fix without ca
       specFilters: [],
     },
     spec,
-    { createCodex: () => fakeCodex },
+    fakeWorkflowDeps(fakeCodex),
   );
 
   assert.equal(outcome.status, "failed");
@@ -809,7 +864,7 @@ test("executeSpec throws when a reviewer reports the wrong reviewer identity", a
         specFilters: [],
       },
       spec,
-      { createCodex: () => fakeCodex },
+      fakeWorkflowDeps(fakeCodex),
     ),
     /Reviewer output mismatch/,
   );
@@ -895,7 +950,7 @@ test("executeSpec warns and drops resume state when the SDK returns a null threa
         specFilters: [],
       },
       spec,
-      { createCodex: () => fakeCodex },
+      fakeWorkflowDeps(fakeCodex),
     );
     assert.equal(outcome.status, "done");
   } finally {
@@ -980,9 +1035,7 @@ test("executeSpec fails when the final supervisor outcome is not done", async ()
     specFilters: [],
   };
 
-  const outcome = await executeSpec(paths, options, spec, {
-    createCodex: () => fakeCodex,
-  });
+  const outcome = await executeSpec(paths, options, spec, fakeWorkflowDeps(fakeCodex));
 
   assert.equal(outcome.status, "failed");
   assert.equal(outcome.candidateCommit, commitHash);

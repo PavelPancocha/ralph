@@ -6,8 +6,16 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { promises as fs } from "node:fs";
 
-import { buildRuntimePaths, ensureRuntimePaths, ensureSpecWorktree, initialRunState } from "../src/runtime.js";
-import type { RuntimePaths, SpecDocument } from "../src/types.js";
+import {
+  buildRuntimePaths,
+  defaultCodexHome,
+  ensureCodexHome,
+  ensureRuntimePaths,
+  ensureSpecWorktree,
+  initialRunState,
+  validateImplementationCandidate,
+} from "../src/runtime.js";
+import type { ImplementationReport, RuntimePaths, SpecDocument } from "../src/types.js";
 
 const execFile = promisify(execFileCb);
 
@@ -149,12 +157,84 @@ test("ensureSpecWorktree reuses an existing feature branch without resetting it"
 
   const worktreePath = await ensureSpecWorktree(paths, spec, repoRoot);
   const { stdout: worktreeHead } = await execFile("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+  const { stdout: worktreeStatus } = await execFile("git", ["-C", worktreePath, "status", "--short"]);
 
   assert.equal(worktreeHead.trim(), featureCommit);
+  assert.equal(worktreeStatus.trim(), "");
   assert.equal(await fs.readFile(path.join(worktreePath, "feature.txt"), "utf8"), "feature change\n");
   await fs.access(path.join(worktreePath, ".codex", "config.toml"));
 
   const reusedPath = await ensureSpecWorktree(paths, spec, repoRoot);
   assert.equal(reusedPath, worktreePath);
   await fs.access(path.join(worktreePath, ".codex", "hooks", "noop.mjs"));
+});
+
+test("ensureCodexHome seeds auth and config from the user Codex home without overwriting local files", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-codex-home-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const paths = buildRuntimePaths(projectRoot, workspaceRoot);
+  await ensureRuntimePaths(paths);
+
+  const externalCodexHome = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-user-codex-"));
+  await fs.writeFile(path.join(externalCodexHome, "auth.json"), "{\"access_token\":\"test-token\"}\n", "utf8");
+  await fs.writeFile(path.join(externalCodexHome, "config.toml"), "model = \"gpt-5.3-codex\"\n", "utf8");
+
+  const originalCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = externalCodexHome;
+  try {
+    const codexHome = await ensureCodexHome(paths);
+    assert.equal(codexHome, defaultCodexHome(paths));
+    assert.equal(
+      await fs.readFile(path.join(codexHome, "auth.json"), "utf8"),
+      "{\"access_token\":\"test-token\"}\n",
+    );
+    assert.equal(
+      await fs.readFile(path.join(codexHome, "config.toml"), "utf8"),
+      "model = \"gpt-5.3-codex\"\n",
+    );
+
+    await fs.writeFile(path.join(codexHome, "config.toml"), "model = \"local-override\"\n", "utf8");
+    await ensureCodexHome(paths);
+    assert.equal(
+      await fs.readFile(path.join(codexHome, "config.toml"), "utf8"),
+      "model = \"local-override\"\n",
+    );
+  } finally {
+    if (originalCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = originalCodexHome;
+    }
+  }
+});
+
+test("validateImplementationCandidate rejects dirty or mismatched reports and accepts a clean commit", async () => {
+  const { repoRoot, paths, spec, featureCommit } = await createRuntimeFixture();
+  const worktreePath = await ensureSpecWorktree(paths, spec, repoRoot);
+  await fs.writeFile(path.join(worktreePath, "README.md"), "# demo\n\nRalph e2e smoke test.\n", "utf8");
+
+  const invalidReport: ImplementationReport = {
+    summary: "Claimed a commit without creating one.",
+    commitHash: featureCommit,
+    changedFiles: ["README.md"],
+    verificationCommands: ["git status --short"],
+    verificationSummary: "README was edited.",
+    concerns: [],
+  };
+  const invalidFinding = await validateImplementationCandidate(worktreePath, invalidReport);
+  assert.ok(invalidFinding);
+  assert.match(invalidFinding.detail, /Reported changed files README\.md do not match committed files feature\.txt\./);
+  assert.match(invalidFinding.detail, /Worktree is not clean after the reported commit: M README\.md\./);
+
+  await execFile("git", ["-C", worktreePath, "add", "README.md"]);
+  await execFile("git", ["-C", worktreePath, "commit", "-m", "smoke"], { cwd: worktreePath });
+  const { stdout: validCommit } = await execFile("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+
+  const validReport: ImplementationReport = {
+    ...invalidReport,
+    summary: "Committed the README change cleanly.",
+    commitHash: validCommit.trim(),
+  };
+  const validFinding = await validateImplementationCandidate(worktreePath, validReport);
+  assert.equal(validFinding, null);
 });
