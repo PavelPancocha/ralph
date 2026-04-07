@@ -40,16 +40,9 @@ import {
   saveRunState,
 } from "./runtime.js";
 
-const reviewerRoleByName = {
-  correctness: "reviewerCorrectness",
-  tests: "reviewerTests",
-  security: "reviewerSecurity",
-  performance: "reviewerPerformance",
-} as const;
-
 const supervisorStrategySchema = z.object({
   summary: z.string(),
-  reviewerRoles: z.array(z.enum(["correctness", "tests", "security", "performance"])).min(2),
+  reviewerRoles: z.array(z.enum(["correctness", "tests", "security", "performance"])),
   keyRisks: z.array(z.string()),
   notesForUnderstander: z.array(z.string()),
 });
@@ -61,7 +54,6 @@ const understandingPacketSchema = z.object({
   featureBranch: z.string(),
   targetFiles: z.array(z.string()),
   contextFiles: z.array(z.string()),
-  reviewerRoles: z.array(z.enum(["correctness", "tests", "security", "performance"])).min(2),
   executionPlan: z.array(z.string()).min(1),
   verificationCommands: z.array(z.string()).min(1),
   assumptions: z.array(z.string()),
@@ -106,6 +98,158 @@ const supervisorOutcomeSchema = z.object({
   candidateCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   nextAction: z.string(),
 });
+
+const defaultReviewerRoles: ReviewerReport["reviewer"][] = ["correctness", "tests"];
+
+interface StructuredOutputSchema<T> {
+  zod: z.ZodTypeAny;
+  json: Record<string, unknown>;
+}
+
+const reviewFindingJsonSchema = {
+  type: "object",
+  properties: {
+    severity: { type: "string", enum: ["info", "warning", "error"] },
+    category: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
+    title: { type: "string" },
+    detail: { type: "string" },
+    action: { type: "string" },
+  },
+  required: ["severity", "category", "title", "detail", "action"],
+  additionalProperties: false,
+};
+
+const supervisorStrategyOutputSchema: StructuredOutputSchema<SupervisorStrategy> = {
+  zod: supervisorStrategySchema,
+  json: {
+    type: "object",
+    properties: {
+      summary: { type: "string" },
+      reviewerRoles: {
+        type: "array",
+        items: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
+      },
+      keyRisks: { type: "array", items: { type: "string" } },
+      notesForUnderstander: { type: "array", items: { type: "string" } },
+    },
+    required: ["summary", "reviewerRoles", "keyRisks", "notesForUnderstander"],
+    additionalProperties: false,
+  },
+};
+
+const understandingPacketOutputSchema: StructuredOutputSchema<UnderstandingPacket> = {
+  zod: understandingPacketSchema,
+  json: {
+    type: "object",
+    properties: {
+      summary: { type: "string" },
+      repoPath: { type: "string" },
+      worktreePath: { type: "string" },
+      featureBranch: { type: "string" },
+      targetFiles: { type: "array", items: { type: "string" } },
+      contextFiles: { type: "array", items: { type: "string" } },
+      executionPlan: { type: "array", minItems: 1, items: { type: "string" } },
+      verificationCommands: { type: "array", minItems: 1, items: { type: "string" } },
+      assumptions: { type: "array", items: { type: "string" } },
+      riskFlags: { type: "array", items: { type: "string" } },
+    },
+    required: [
+      "summary",
+      "repoPath",
+      "worktreePath",
+      "featureBranch",
+      "targetFiles",
+      "contextFiles",
+      "executionPlan",
+      "verificationCommands",
+      "assumptions",
+      "riskFlags",
+    ],
+    additionalProperties: false,
+  },
+};
+
+const implementationReportOutputSchema: StructuredOutputSchema<ImplementationReport> = {
+  zod: implementationReportSchema,
+  json: {
+    type: "object",
+    properties: {
+      summary: { type: "string" },
+      commitHash: { type: "string", pattern: "^[0-9a-f]{40}$" },
+      changedFiles: { type: "array", items: { type: "string" } },
+      verificationCommands: { type: "array", items: { type: "string" } },
+      verificationSummary: { type: "string" },
+      concerns: { type: "array", items: { type: "string" } },
+    },
+    required: [
+      "summary",
+      "commitHash",
+      "changedFiles",
+      "verificationCommands",
+      "verificationSummary",
+      "concerns",
+    ],
+    additionalProperties: false,
+  },
+};
+
+const reviewerReportOutputSchema: StructuredOutputSchema<ReviewerReport> = {
+  zod: reviewerReportSchema,
+  json: {
+    type: "object",
+    properties: {
+      reviewer: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
+      status: { type: "string", enum: ["approved", "changes_requested"] },
+      summary: { type: "string" },
+      findings: {
+        type: "array",
+        items: reviewFindingJsonSchema,
+      },
+    },
+    required: ["reviewer", "status", "summary", "findings"],
+    additionalProperties: false,
+  },
+};
+
+const recheckVerdictOutputSchema: StructuredOutputSchema<RecheckVerdict> = {
+  zod: recheckVerdictSchema,
+  json: {
+    type: "object",
+    properties: {
+      verdict: { type: "string", enum: ["approve", "needs_fix", "invalidate_plan"] },
+      summary: { type: "string" },
+      acceptedFindings: {
+        type: "array",
+        items: reviewFindingJsonSchema,
+      },
+      rejectedFindings: { type: "array", items: { type: "string" } },
+      fixInstructions: { type: "array", items: { type: "string" } },
+    },
+    required: ["verdict", "summary", "acceptedFindings", "rejectedFindings", "fixInstructions"],
+    additionalProperties: false,
+  },
+};
+
+const supervisorOutcomeOutputSchema: StructuredOutputSchema<SupervisorOutcome> = {
+  zod: supervisorOutcomeSchema,
+  json: {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["done", "needs_more_work", "failed"] },
+      summary: { type: "string" },
+      candidateCommit: { type: "string", pattern: "^[0-9a-f]{40}$" },
+      nextAction: { type: "string" },
+    },
+    required: ["status", "summary", "nextAction"],
+    additionalProperties: false,
+  },
+};
+
+function mergeReviewerRoles(
+  ...groups: Array<ReadonlyArray<ReviewerReport["reviewer"]>>
+): ReviewerReport["reviewer"][] {
+  return [...new Set(groups.flat())];
+}
 
 interface ThreadLike {
   id: string | null;
@@ -186,16 +330,21 @@ async function runStructuredTurn<T>(
   state: RunState,
   runId: string,
   options: RoleExecutionOptions,
-  schema: z.ZodType<T>,
+  schema: StructuredOutputSchema<T>,
   prompt: string,
 ): Promise<AgentRunArtifact<T>> {
   const threadKey = roleStateKey(options.role);
   const thread = state.threads[threadKey]
     ? codex.resumeThread(state.threads[threadKey] as string, roleThreadOptions(options))
     : codex.startThread(roleThreadOptions(options));
-  const turn = await thread.run(prompt, { outputSchema: schemaToJsonSchema(schema) });
-  const parsed = schema.parse(JSON.parse(turn.finalResponse));
-  state.threads[threadKey] = thread.id ?? undefined;
+  const turn = await thread.run(prompt, { outputSchema: schema.json });
+  const parsed = schema.zod.parse(JSON.parse(turn.finalResponse)) as T;
+  if (thread.id === null) {
+    console.warn(`[ralph] Thread id missing for role=${options.role}, spec=${spec.specId}; resume context may be lost.`);
+    state.threads[threadKey] = undefined;
+  } else {
+    state.threads[threadKey] = thread.id;
+  }
   state.updatedAt = new Date().toISOString();
   await saveRunState(paths, state);
   const artifact: AgentRunArtifact<T> = {
@@ -213,153 +362,9 @@ async function runStructuredTurn<T>(
     items: turn.items as unknown[],
     rawResponse: turn.finalResponse,
   };
-  await saveArtifact(paths, spec.specId, runId, options.role, artifact);
+  const artifactIteration = state.currentIteration > 0 ? state.currentIteration : "setup";
+  await saveArtifact(paths, spec.specId, runId, `${options.role}-${artifactIteration}`, artifact);
   return artifact;
-}
-
-function schemaToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
-  if (schema === supervisorStrategySchema) {
-    return {
-      type: "object",
-      properties: {
-        summary: { type: "string" },
-        reviewerRoles: {
-          type: "array",
-          items: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
-        },
-        keyRisks: { type: "array", items: { type: "string" } },
-        notesForUnderstander: { type: "array", items: { type: "string" } },
-      },
-      required: ["summary", "reviewerRoles", "keyRisks", "notesForUnderstander"],
-      additionalProperties: false,
-    };
-  }
-  if (schema === understandingPacketSchema) {
-    return {
-      type: "object",
-      properties: {
-        summary: { type: "string" },
-        repoPath: { type: "string" },
-        worktreePath: { type: "string" },
-        featureBranch: { type: "string" },
-        targetFiles: { type: "array", items: { type: "string" } },
-        contextFiles: { type: "array", items: { type: "string" } },
-        reviewerRoles: {
-          type: "array",
-          items: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
-        },
-        executionPlan: { type: "array", items: { type: "string" } },
-        verificationCommands: { type: "array", items: { type: "string" } },
-        assumptions: { type: "array", items: { type: "string" } },
-        riskFlags: { type: "array", items: { type: "string" } },
-      },
-      required: [
-        "summary",
-        "repoPath",
-        "worktreePath",
-        "featureBranch",
-        "targetFiles",
-        "contextFiles",
-        "reviewerRoles",
-        "executionPlan",
-        "verificationCommands",
-        "assumptions",
-        "riskFlags",
-      ],
-      additionalProperties: false,
-    };
-  }
-  if (schema === implementationReportSchema) {
-    return {
-      type: "object",
-      properties: {
-        summary: { type: "string" },
-        commitHash: { type: "string", pattern: "^[0-9a-f]{40}$" },
-        changedFiles: { type: "array", items: { type: "string" } },
-        verificationCommands: { type: "array", items: { type: "string" } },
-        verificationSummary: { type: "string" },
-        concerns: { type: "array", items: { type: "string" } },
-      },
-      required: [
-        "summary",
-        "commitHash",
-        "changedFiles",
-        "verificationCommands",
-        "verificationSummary",
-        "concerns",
-      ],
-      additionalProperties: false,
-    };
-  }
-  if (schema === reviewerReportSchema) {
-    return {
-      type: "object",
-      properties: {
-        reviewer: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
-        status: { type: "string", enum: ["approved", "changes_requested"] },
-        summary: { type: "string" },
-        findings: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              severity: { type: "string", enum: ["info", "warning", "error"] },
-              category: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
-              title: { type: "string" },
-              detail: { type: "string" },
-              action: { type: "string" },
-            },
-            required: ["severity", "category", "title", "detail", "action"],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ["reviewer", "status", "summary", "findings"],
-      additionalProperties: false,
-    };
-  }
-  if (schema === recheckVerdictSchema) {
-    return {
-      type: "object",
-      properties: {
-        verdict: { type: "string", enum: ["approve", "needs_fix", "invalidate_plan"] },
-        summary: { type: "string" },
-        acceptedFindings: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              severity: { type: "string", enum: ["info", "warning", "error"] },
-              category: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
-              title: { type: "string" },
-              detail: { type: "string" },
-              action: { type: "string" },
-            },
-            required: ["severity", "category", "title", "detail", "action"],
-            additionalProperties: false,
-          },
-        },
-        rejectedFindings: { type: "array", items: { type: "string" } },
-        fixInstructions: { type: "array", items: { type: "string" } },
-      },
-      required: ["verdict", "summary", "acceptedFindings", "rejectedFindings", "fixInstructions"],
-      additionalProperties: false,
-    };
-  }
-  if (schema === supervisorOutcomeSchema) {
-    return {
-      type: "object",
-      properties: {
-        status: { type: "string", enum: ["done", "needs_more_work", "failed"] },
-        summary: { type: "string" },
-        candidateCommit: { type: "string", pattern: "^[0-9a-f]{40}$" },
-        nextAction: { type: "string" },
-      },
-      required: ["status", "summary", "nextAction"],
-      additionalProperties: false,
-    };
-  }
-  throw new Error("Unsupported schema");
 }
 
 function implementationPromptFixes(findings: ReviewFinding[]): string[] {
@@ -453,9 +458,10 @@ export async function executeSpec(
       approvalPolicy: "never",
       reasoningEffort: "high",
     },
-    supervisorStrategySchema,
+    supervisorStrategyOutputSchema,
     buildSupervisorPrompt(spec, worktreePath),
   );
+  const plannedReviewerRoles = mergeReviewerRoles(defaultReviewerRoles, supervisorStrategy.output.reviewerRoles);
 
   let invalidationReason: string | undefined;
   let acceptedFindings: ReviewFinding[] = [];
@@ -482,7 +488,7 @@ export async function executeSpec(
         approvalPolicy: "never",
         reasoningEffort: "high",
       },
-      understandingPacketSchema,
+      understandingPacketOutputSchema,
       buildUnderstanderPrompt(spec, worktreePath, supervisorStrategy.output, invalidationReason),
     );
     understandingPacket = understanding.output;
@@ -521,7 +527,7 @@ export async function executeSpec(
         approvalPolicy: "never",
         reasoningEffort: "medium",
       },
-      implementationReportSchema,
+      implementationReportOutputSchema,
       buildImplementerPrompt(spec, understanding.output, worktreePath, implementationPromptFixes(acceptedFindings)),
     );
     implementationReport = implementation.output;
@@ -530,22 +536,25 @@ export async function executeSpec(
 
     state.status = "reviewing";
     await saveRunState(paths, state);
-    const reviewerRoles = understanding.output.reviewerRoles;
-    const reviewerReports = await Promise.all(
-      reviewerRoles.map((reviewer) =>
-        runStructuredTurn(
-          codex,
-          paths,
-          spec,
-          state,
-          runId,
-          reviewerRoleOptions(worktreePath, options.model, reviewer),
-          reviewerReportSchema,
-          buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath),
-        ),
-      ),
-    );
-    const reviewerOutputs = reviewerReports.map((item) => item.output);
+    const reviewerOutputs: ReviewerReport[] = [];
+    for (const reviewer of plannedReviewerRoles) {
+      const reviewerReport = await runStructuredTurn(
+        codex,
+        paths,
+        spec,
+        state,
+        runId,
+        reviewerRoleOptions(worktreePath, options.model, reviewer),
+        reviewerReportOutputSchema,
+        buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath),
+      );
+      if (reviewerReport.output.reviewer !== reviewer) {
+        throw new Error(
+          `Reviewer output mismatch for spec ${spec.specId}: expected ${reviewer}, got ${reviewerReport.output.reviewer}`,
+        );
+      }
+      reviewerOutputs.push(reviewerReport.output);
+    };
 
     state.status = "rechecking";
     await saveRunState(paths, state);
@@ -563,7 +572,7 @@ export async function executeSpec(
         approvalPolicy: "never",
         reasoningEffort: "high",
       },
-      recheckVerdictSchema,
+      recheckVerdictOutputSchema,
       buildRecheckPrompt(spec, understanding.output, implementation.output, reviewerOutputs, worktreePath),
     );
     recheckVerdict = recheck.output;
@@ -574,6 +583,7 @@ export async function executeSpec(
     }
     if (recheck.output.verdict === "invalidate_plan") {
       invalidationReason = recheck.output.summary;
+      acceptedFindings = [];
       state.threads.understander = undefined;
       state.threads.implementer = undefined;
       state.threads.reviewerCorrectness = undefined;
@@ -598,6 +608,18 @@ export async function executeSpec(
     return failed;
   }
 
+  if (recheckVerdict.verdict !== "approve") {
+    state.status = "failed";
+    state.lastError = recheckVerdict.summary;
+    await saveRunState(paths, state);
+    return {
+      status: "failed",
+      summary: recheckVerdict.summary,
+      candidateCommit: implementationReport.commitHash,
+      nextAction: "Rerun after inspecting accepted findings.",
+    };
+  }
+
   const supervisorFinal = await runStructuredTurn(
     codex,
     paths,
@@ -612,19 +634,19 @@ export async function executeSpec(
       approvalPolicy: "never",
       reasoningEffort: "high",
     },
-    supervisorOutcomeSchema,
+    supervisorOutcomeOutputSchema,
     buildSupervisorFinalPrompt(spec, understandingPacket, implementationReport, recheckVerdict),
   );
 
-  if (recheckVerdict.verdict !== "approve") {
+  if (supervisorFinal.output.status !== "done") {
     state.status = "failed";
-    state.lastError = recheckVerdict.summary;
+    state.lastError = supervisorFinal.output.summary;
     await saveRunState(paths, state);
     return {
       status: "failed",
-      summary: recheckVerdict.summary,
+      summary: supervisorFinal.output.summary,
       candidateCommit: implementationReport.commitHash,
-      nextAction: "Rerun after inspecting accepted findings.",
+      nextAction: supervisorFinal.output.nextAction,
     };
   }
 

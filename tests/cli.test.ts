@@ -4,7 +4,67 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
-import { runCommand } from "../src/cli.js";
+import { parseArgs, runCommand } from "../src/cli.js";
+
+test("parseArgs keeps the first positional token as a run filter when the subcommand is omitted", () => {
+  const parsed = parseArgs(["1001-demo", "--dry-run", "--max-iterations", "5"]);
+
+  assert.equal(parsed.command, "run");
+  assert.equal(parsed.parseError, undefined);
+  assert.deepEqual(parsed.specFilters, ["1001-demo"]);
+  assert.equal(parsed.dryRun, true);
+  assert.equal(parsed.maxIterations, 5);
+});
+
+test("parseArgs marks unknown first commands as parse errors", async () => {
+  const parsed = parseArgs(["rn", "1001-demo"]);
+  assert.equal(parsed.parseError, "Unknown command: rn");
+
+  let errorOutput = "";
+  const originalError = console.error;
+  console.error = (message?: unknown) => {
+    errorOutput += `${String(message)}\n`;
+  };
+  try {
+    const exitCode = await runCommand(parsed);
+    assert.equal(exitCode, 1);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.match(errorOutput, /Unknown command: rn/);
+});
+
+test("parseArgs rejects invalid --max-iterations values", async () => {
+  const parsed = parseArgs(["run", "--max-iterations", "nope"]);
+  assert.equal(parsed.parseError, "Invalid --max-iterations value: nope");
+  assert.equal(parsed.maxIterations, 3);
+
+  let errorOutput = "";
+  const originalError = console.error;
+  console.error = (message?: unknown) => {
+    errorOutput += `${String(message)}\n`;
+  };
+  try {
+    const exitCode = await runCommand(parsed);
+    assert.equal(exitCode, 1);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.match(errorOutput, /Invalid --max-iterations value: nope/);
+});
+
+test("parseArgs accepts spec-like shorthand filters and flag-only run invocations", () => {
+  const nestedSpec = parseArgs(["area/1234-demo.md"]);
+  assert.equal(nestedSpec.parseError, undefined);
+  assert.deepEqual(nestedSpec.specFilters, ["area/1234-demo.md"]);
+
+  const flagOnly = parseArgs(["--dry-run"]);
+  assert.equal(flagOnly.parseError, undefined);
+  assert.equal(flagOnly.command, "run");
+  assert.equal(flagOnly.dryRun, true);
+});
 
 test("create-spec scaffolds a spec with required and recommended sections", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-"));

@@ -86,29 +86,41 @@ function parseCodeFenceCommands(block: string | undefined): string[] {
   return commands;
 }
 
+function parseInstructionValue(line: string, label: string): string | undefined {
+  const match = new RegExp(`^${label}:\\s*(.+)$`).exec(line);
+  if (!match) {
+    return undefined;
+  }
+  const rawValue = match[1]!.trim();
+  if (rawValue.startsWith("`") && rawValue.endsWith("`")) {
+    return rawValue.slice(1, -1).trim();
+  }
+  return rawValue;
+}
+
 function parseBranchInstructions(block: string | undefined): BranchInstructions {
   const lines = parseBulletList(block);
   const parsed: Partial<BranchInstructions> = {};
 
   for (const line of lines) {
-    const source = /^Source branch:\s*`?(.+?)`?$/.exec(line);
-    if (source) {
-      parsed.sourceBranch = source[1]!.trim();
+    const source = parseInstructionValue(line, "Source branch");
+    if (source !== undefined) {
+      parsed.sourceBranch = source;
       continue;
     }
-    const create = /^Create branch:\s*`?(.+?)`?$/.exec(line);
-    if (create) {
-      parsed.createBranch = create[1]!.trim();
+    const create = parseInstructionValue(line, "Create branch");
+    if (create !== undefined) {
+      parsed.createBranch = create;
       continue;
     }
-    const prTarget = /^PR target:\s*`?(.+?)`?$/.exec(line);
-    if (prTarget) {
-      parsed.prTarget = prTarget[1]!.trim();
+    const prTarget = parseInstructionValue(line, "PR target");
+    if (prTarget !== undefined) {
+      parsed.prTarget = prTarget;
       continue;
     }
-    const nextBase = /^Next spec base:\s*`?(.+?)`?$/.exec(line);
-    if (nextBase) {
-      parsed.nextSpecBase = nextBase[1]!.trim();
+    const nextBase = parseInstructionValue(line, "Next spec base");
+    if (nextBase !== undefined) {
+      parsed.nextSpecBase = nextBase;
     }
   }
 
@@ -119,6 +131,25 @@ function parseBranchInstructions(block: string | undefined): BranchInstructions 
     ...(validated.prTarget ? { prTarget: validated.prTarget } : {}),
     ...(validated.nextSpecBase ? { nextSpecBase: validated.nextSpecBase } : {}),
   };
+}
+
+async function isRunnableSpecFile(absolute: string): Promise<boolean> {
+  const raw = await fs.readFile(absolute, "utf8");
+  const lines = raw.split("\n").map(normalizeLine);
+  const repoLine = lines.find((line) => line.startsWith("Repo:"));
+  const workdirLine = lines.find((line) => line.startsWith("Workdir:"));
+  if (!repoLine || !workdirLine) {
+    return false;
+  }
+  if (!repoLine.replace("Repo:", "").trim() || !workdirLine.replace("Workdir:", "").trim()) {
+    return false;
+  }
+  try {
+    parseBranchInstructions(parseSections(raw)["Branch Instructions"]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function titleFromSpecFilename(filename: string): string {
@@ -201,9 +232,6 @@ export async function createSampleSpecFile(projectRoot: string, relFromSpecs: st
       await fs.writeFile(absolute, buildSampleSpecTemplate(relFromSpecs), "utf8");
       return absolute;
     }
-    if ((error as NodeJS.ErrnoException).code) {
-      throw error;
-    }
     throw error;
   }
   throw new Error(`Spec already exists: ${relFromSpecs}`);
@@ -230,6 +258,9 @@ export async function discoverSpecPaths(specsRoot: string): Promise<string[]> {
         continue;
       }
       if (!SPEC_FILE_RE.test(entry.name)) {
+        continue;
+      }
+      if (!(await isRunnableSpecFile(absolute))) {
         continue;
       }
       result.push(relFromSpecs);
@@ -261,6 +292,9 @@ export async function parseSpecFile(
 
   const repo = repoLine.replace("Repo:", "").trim();
   const workdir = workdirLine.replace("Workdir:", "").trim();
+  if (!repo || !workdir) {
+    throw new Error(`Spec ${relFromSpecs} must provide non-empty Repo: and Workdir: values`);
+  }
   const specId = path.basename(relFromSpecs, ".md");
 
   const bigPicture = parseParagraph(sections["Big Picture"]);

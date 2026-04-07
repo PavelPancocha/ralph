@@ -118,7 +118,6 @@ export interface UnderstandingPacket {
   featureBranch: string;
   targetFiles: string[];
   contextFiles: string[];
-  reviewerRoles: Array<"correctness" | "tests" | "security" | "performance">;
   executionPlan: string[];
   verificationCommands: string[];
   assumptions: string[];

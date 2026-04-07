@@ -22,13 +22,13 @@ The design goal is to preserve the old Ralph feel, meaning a file-first backlog 
 For a runnable spec, Ralph executes this sequence:
 
 1. `supervisor`
-   Chooses the review strategy and reviewer set.
+   Chooses any additional review coverage beyond the default correctness/tests pass.
 2. `understander`
    Reads the spec and repository, then emits an `UnderstandingPacket`.
 3. `implementer`
    Applies the change in the active worktree and emits an `ImplementationReport`.
 4. `reviewers`
-   Review the candidate implementation. `correctness` and `tests` are expected by default; `security` and `performance` are available when requested.
+   Review the candidate implementation. `correctness` and `tests` always run; `security` and `performance` are added when the supervisor requests them.
 5. `recheck`
    Accepts or rejects reviewer findings and returns one of:
    - `approve`
@@ -39,7 +39,7 @@ For a runnable spec, Ralph executes this sequence:
 
 If recheck returns `needs_fix`, the loop continues until `maxIterations` is reached.
 
-If recheck returns `invalidate_plan`, Ralph clears the understander/implementer/reviewer thread references and starts a fresh planning pass inside the same spec run.
+If recheck returns `invalidate_plan`, Ralph clears the understander/implementer/reviewer/recheck thread references and starts a fresh planning pass inside the same spec run.
 
 ## Source Layout
 
@@ -179,6 +179,10 @@ The current parser recognizes:
 - `Next spec base: ...`
 
 The `Source branch` and `Create branch` fields are required.
+
+For a runnable spec, `Repo:`, `Workdir:`, and non-empty `Source branch` / `Create branch` values are the hard parser requirements. The remaining sections are parsed when present and scaffolded by `create-spec` because they produce better execution packets and reviews.
+
+The `run` command only picks runnable specs from the backlog. Draft or analysis files that match the filename pattern but do not satisfy that minimum contract are ignored until they are filled in.
 
 ## Run State Model
 

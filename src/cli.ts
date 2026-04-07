@@ -18,12 +18,26 @@ export interface ParsedArgs {
   dryRun: boolean;
   inspectTarget: string | undefined;
   createSpecTarget: string | undefined;
+  parseError?: string;
+}
+
+function looksLikeSpecFilter(token: string): boolean {
+  return /(^|\/)\d{4,}/.test(token) || token.endsWith(".md");
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
-  const [command = "run", ...rest] = argv;
+  const [firstToken, ...remainingTokens] = argv;
+  const hasExplicitCommand =
+    firstToken === "run" || firstToken === "status" || firstToken === "inspect" || firstToken === "create-spec";
+  let parseError =
+    firstToken && !hasExplicitCommand && !firstToken.startsWith("--") && !looksLikeSpecFilter(firstToken)
+      ? `Unknown command: ${firstToken}`
+      : undefined;
+  const command: ParsedArgs["command"] =
+    firstToken === "status" || firstToken === "inspect" || firstToken === "create-spec" ? firstToken : "run";
+  const rest = hasExplicitCommand ? remainingTokens : parseError ? remainingTokens : argv;
   const args: ParsedArgs = {
-    command: command === "status" || command === "inspect" || command === "create-spec" ? command : "run",
+    command,
     specFilters: [],
     model: "gpt-5.3-codex",
     maxIterations: 3,
@@ -31,6 +45,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     workspaceRoot: undefined,
     inspectTarget: undefined,
     createSpecTarget: undefined,
+    ...(parseError ? { parseError } : {}),
   };
 
   for (let index = 0; index < rest.length; index += 1) {
@@ -49,7 +64,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (token === "--max-iterations") {
-      args.maxIterations = Number(rest[index + 1] ?? args.maxIterations);
+      const parsedIterations = Number(rest[index + 1] ?? args.maxIterations);
+      if (!Number.isInteger(parsedIterations) || parsedIterations < 1) {
+        parseError ??= `Invalid --max-iterations value: ${rest[index + 1] ?? ""}`.trim();
+      } else {
+        args.maxIterations = parsedIterations;
+      }
       index += 1;
       continue;
     }
@@ -68,10 +88,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
     args.specFilters.push(token);
   }
 
+  if (parseError) {
+    args.parseError = parseError;
+  }
   return args;
 }
 
 export async function runCommand(parsed: ParsedArgs): Promise<number> {
+  if (parsed.parseError) {
+    console.error(`${parsed.parseError}. Use one of: run, status, inspect, create-spec.`);
+    return 1;
+  }
+
   const projectRoot = process.cwd();
   const workspaceRoot = parsed.workspaceRoot
     ? path.resolve(parsed.workspaceRoot)

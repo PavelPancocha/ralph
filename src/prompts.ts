@@ -45,6 +45,7 @@ export function buildSupervisorPrompt(spec: SpecDocument, worktreePath: string):
   return [
     "You are Ralph's supervisor agent.",
     "Your job is to decide the best specialist flow for this spec and identify review coverage.",
+    "Correctness and tests reviewers are always included. Use reviewerRoles only for any extra security or performance coverage that the spec justifies.",
     "Do not edit files or run mutating commands.",
     "",
     `Active worktree: ${worktreePath}`,
@@ -75,7 +76,11 @@ export function buildUnderstanderPrompt(
   ];
 
   if (previousInvalidationReason) {
-    lines.push("", `Previous plan invalidation reason: ${previousInvalidationReason}`);
+    lines.push(
+      "",
+      `Previous plan invalidation reason: ${previousInvalidationReason}`,
+      "Treat the prior supervisor strategy as historical context only when it conflicts with this invalidation reason.",
+    );
   }
 
   lines.push(

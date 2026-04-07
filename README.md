@@ -8,10 +8,10 @@ This repository is the v2 rewrite. The old Python runner still exists in the tre
 
 For each spec, Ralph runs a fixed role pipeline:
 
-1. `supervisor` chooses review coverage.
+1. `supervisor` chooses any additional review coverage beyond the default pass.
 2. `understander` reads the spec and repo, then produces an execution packet.
 3. `implementer` makes the change in an isolated worktree and commits it.
-4. `reviewers` check correctness and tests by default, with optional security and performance review.
+4. `reviewers` always run correctness and tests, with optional security and performance review when the supervisor asks for it.
 5. `recheck` decides whether the implementation is approved, needs another fix loop, or invalidates the plan.
 6. `supervisor` closes the run and writes the final result.
 
@@ -58,6 +58,9 @@ node dist/src/cli.js run --max-iterations 3
 
 # Inspect parsed spec JSON
 node dist/src/cli.js inspect 1001-demo.md
+
+# Inspect a nested spec (path is relative to specs/)
+node dist/src/cli.js inspect area/1235-follow-up-spec.md
 
 # Create a new sample spec
 node dist/src/cli.js create-spec area/1234-sample-feature.md
@@ -110,26 +113,28 @@ node dist/src/cli.js create-spec 1234-my-new-spec.md
 node dist/src/cli.js create-spec area/1235-follow-up-spec.md
 ```
 
-The parser currently expects:
+For a runnable spec, the parser currently requires:
 
 - `Repo: ...`
 - `Workdir: ...`
-- `## Branch Instructions`
+- `## Branch Instructions` with non-empty `Source branch` and `Create branch` values
+
+It also understands and preserves these sections when present:
+
 - `## Goal`
 - `## Constraints`
 - `## Dependencies`
 - `## Required Reading`
 - `## Acceptance Criteria`
 - `## Verification (Fast-First)`
-
-It also understands these optional sections:
-
 - `## Big Picture`
 - `## Scope (In)`
 - `## Boundaries (Out, No Overlap)` or `## Boundaries (Out)`
 - `## Commit Requirements`
 
-The scaffolded template includes both the required sections and the recommended sections, with placeholders you can fill in before running the spec.
+The scaffolded template includes the fuller recommended spec shape, with placeholders you should fill in before running a real spec.
+
+The `run` command only selects runnable specs. Draft or analysis markdown files that happen to match the filename pattern are ignored until they provide that minimum runnable contract.
 
 ### Example spec
 

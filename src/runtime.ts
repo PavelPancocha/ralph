@@ -107,7 +107,7 @@ export async function legacyDoneExists(projectRoot: string, spec: SpecDocument):
 }
 
 export async function resolveRepoPath(paths: RuntimePaths, spec: SpecDocument): Promise<string> {
-  const repoPath = path.resolve(paths.workspaceRoot, spec.workdir || spec.repo);
+  const repoPath = path.resolve(paths.workspaceRoot, spec.workdir);
   const stat = await fs.stat(repoPath).catch(() => null);
   if (!stat?.isDirectory()) {
     throw new Error(`Repo path does not exist for spec ${spec.specId}: ${repoPath}`);
@@ -118,6 +118,15 @@ export async function resolveRepoPath(paths: RuntimePaths, spec: SpecDocument): 
 async function pathExists(absolute: string): Promise<boolean> {
   try {
     await fs.access(absolute);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function localBranchExists(repoPath: string, branch: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["-C", repoPath, "rev-parse", "--verify", `refs/heads/${branch}`]);
     return true;
   } catch {
     return false;
@@ -160,16 +169,28 @@ export async function ensureSpecWorktree(
   }
 
   await fs.mkdir(paths.worktreesRoot, { recursive: true });
-  await execFileAsync("git", [
-    "-C",
-    repoPath,
-    "worktree",
-    "add",
-    "-B",
-    spec.branchInstructions.createBranch,
-    worktreePath,
-    spec.branchInstructions.sourceBranch,
-  ]);
+  const branchExists = await localBranchExists(repoPath, spec.branchInstructions.createBranch);
+  if (branchExists) {
+    await execFileAsync("git", [
+      "-C",
+      repoPath,
+      "worktree",
+      "add",
+      worktreePath,
+      spec.branchInstructions.createBranch,
+    ]);
+  } else {
+    await execFileAsync("git", [
+      "-C",
+      repoPath,
+      "worktree",
+      "add",
+      "-b",
+      spec.branchInstructions.createBranch,
+      worktreePath,
+      spec.branchInstructions.sourceBranch,
+    ]);
+  }
   await installWorktreeCodexSupport(paths, worktreePath);
   return worktreePath;
 }
