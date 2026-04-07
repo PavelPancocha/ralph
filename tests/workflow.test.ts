@@ -591,6 +591,100 @@ test("executeSpec reruns only targeted reviewers at stronger policy when the rev
   assert.equal(artifactFiles.filter((name) => name.startsWith("review_lead-1")).length, 2);
 });
 
+test("executeSpec persists failed state when an escalated follow-up reviewer returns the wrong identity", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "abababababababababababababababababababab";
+  const correctnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const testsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "No test issues.",
+    findings: [],
+  };
+  const firstSecurityReview = {
+    reviewer: "security" as const,
+    status: "changes_requested" as const,
+    summary: "Need a deeper security read.",
+    findings: [
+      {
+        severity: "warning" as const,
+        category: "security" as const,
+        title: "Need more depth",
+        detail: "The initial review is inconclusive.",
+        action: "Inspect the risky path in more detail.",
+      },
+    ],
+  };
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Security needs extra attention.",
+      reviewerRoles: ["security"],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Edit README and verify with git status.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Implemented change and committed it.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify(correctnessReview),
+    JSON.stringify(testsReview),
+    JSON.stringify(firstSecurityReview),
+    reviewLeadFollowUpResponse(["security"]),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Wrong reviewer identity on escalated rerun.",
+      findings: [],
+    }),
+  ]);
+
+  await assert.rejects(
+    executeSpec(
+      paths,
+      {
+        workspaceRoot,
+        projectRoot,
+        model: undefined,
+        maxIterations: 1,
+        dryRun: false,
+        specFilters: [],
+      },
+      spec,
+      fakeWorkflowDeps(fakeCodex),
+    ),
+    /Reviewer output mismatch/,
+  );
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.status, "failed");
+  assert.match(state.lastError ?? "", /Reviewer output mismatch/);
+});
+
 test("executeSpec carries accepted findings into the next implementer turn on needs_fix", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
@@ -1127,6 +1221,10 @@ test("executeSpec throws when a reviewer reports the wrong reviewer identity", a
     ),
     /Reviewer output mismatch/,
   );
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.status, "failed");
+  assert.match(state.lastError ?? "", /Reviewer output mismatch/);
 });
 
 test("executeSpec warns and drops resume state when the SDK returns a null thread id", async () => {
