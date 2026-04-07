@@ -206,46 +206,21 @@ function defaultPlanningResponses(repoRoot: string, worktreePath: string): strin
   ];
 }
 
-function reviewLeadReadyResponse(reviews: Array<{
-  reviewer: "correctness" | "tests" | "security" | "performance";
-  status: "approved" | "changes_requested";
-  summary: string;
-  findings: Array<{
-    severity: "info" | "warning" | "error";
-    category: "correctness" | "tests" | "security" | "performance";
-    title: string;
-    detail: string;
-    action: string;
-  }>;
-}>, summary = "Review synthesis is ready for recheck."): string {
+function reviewLeadReadyResponse(summary = "Review synthesis is ready for recheck."): string {
   return JSON.stringify({
     status: "ready_for_recheck",
     summary,
-    reviews,
     followUpReviewers: [],
   });
 }
 
 function reviewLeadFollowUpResponse(
   followUpReviewers: Array<"correctness" | "tests" | "security" | "performance">,
-  reviews: Array<{
-    reviewer: "correctness" | "tests" | "security" | "performance";
-    status: "approved" | "changes_requested";
-    summary: string;
-    findings: Array<{
-      severity: "info" | "warning" | "error";
-      category: "correctness" | "tests" | "security" | "performance";
-      title: string;
-      detail: string;
-      action: string;
-    }>;
-  }>,
   summary = "Need targeted follow-up review.",
 ): string {
   return JSON.stringify({
     status: "needs_targeted_follow_up",
     summary,
-    reviews,
     followUpReviewers,
   });
 }
@@ -299,7 +274,7 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
     }),
     JSON.stringify(correctnessReview),
     JSON.stringify(testsReview),
-    reviewLeadReadyResponse([correctnessReview, testsReview]),
+    reviewLeadReadyResponse(),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -448,7 +423,7 @@ test("executeSpec always includes correctness and tests reviewers when the super
     JSON.stringify(correctnessReview),
     JSON.stringify(testsReview),
     JSON.stringify(securityReview),
-    reviewLeadReadyResponse([correctnessReview, testsReview, securityReview]),
+    reviewLeadReadyResponse(),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -554,9 +529,9 @@ test("executeSpec reruns only targeted reviewers at stronger policy when the rev
     JSON.stringify(correctnessReview),
     JSON.stringify(testsReview),
     JSON.stringify(firstSecurityReview),
-    reviewLeadFollowUpResponse(["security"], [correctnessReview, testsReview, firstSecurityReview]),
+    reviewLeadFollowUpResponse(["security"]),
     JSON.stringify(finalSecurityReview),
-    reviewLeadReadyResponse([correctnessReview, testsReview, finalSecurityReview], "Follow-up complete."),
+    reviewLeadReadyResponse("Follow-up complete."),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -680,7 +655,7 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
     }),
     JSON.stringify(firstCorrectnessReview),
     JSON.stringify(firstTestsReview),
-    reviewLeadReadyResponse([firstCorrectnessReview, firstTestsReview]),
+    reviewLeadReadyResponse(),
     JSON.stringify({
       verdict: "needs_fix",
       summary: "Address the accepted reviewer findings.",
@@ -718,7 +693,7 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
     }),
     JSON.stringify(secondCorrectnessReview),
     JSON.stringify(secondTestsReview),
-    reviewLeadReadyResponse([secondCorrectnessReview, secondTestsReview]),
+    reviewLeadReadyResponse(),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -841,7 +816,7 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
     }),
     JSON.stringify(firstCorrectnessReview),
     JSON.stringify(firstTestsReview),
-    reviewLeadReadyResponse([firstCorrectnessReview, firstTestsReview]),
+    reviewLeadReadyResponse(),
     JSON.stringify({
       verdict: "invalidate_plan",
       summary: invalidationReason,
@@ -886,7 +861,7 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
     }),
     JSON.stringify(secondCorrectnessReview),
     JSON.stringify(secondTestsReview),
-    reviewLeadReadyResponse([secondCorrectnessReview, secondTestsReview]),
+    reviewLeadReadyResponse(),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -1045,7 +1020,7 @@ test("executeSpec fails after maxIterations is exhausted on needs_fix without ca
     }),
     JSON.stringify(correctnessReview),
     JSON.stringify(testsReview),
-    reviewLeadReadyResponse([correctnessReview, testsReview]),
+    reviewLeadReadyResponse(),
     JSON.stringify({
       verdict: "needs_fix",
       summary: "The implementation still needs work.",
@@ -1198,7 +1173,7 @@ test("executeSpec warns and drops resume state when the SDK returns a null threa
       }),
       JSON.stringify(correctnessReview),
       JSON.stringify(testsReview),
-      reviewLeadReadyResponse([correctnessReview, testsReview]),
+      reviewLeadReadyResponse(),
       JSON.stringify({
         verdict: "approve",
         summary: "Implementation matches the spec.",
@@ -1266,7 +1241,6 @@ test("executeSpec fails when the final supervisor outcome is not done", async ()
     summary: "Verification coverage is sufficient.",
     findings: [],
   };
-
   const fakeCodex = new FakeCodex([
     ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
     JSON.stringify({
@@ -1297,7 +1271,7 @@ test("executeSpec fails when the final supervisor outcome is not done", async ()
     }),
     JSON.stringify(correctnessReview),
     JSON.stringify(testsReview),
-    reviewLeadReadyResponse([correctnessReview, testsReview]),
+    reviewLeadReadyResponse(),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -1332,4 +1306,379 @@ test("executeSpec fails when the final supervisor outcome is not done", async ()
   assert.equal(state.status, "failed");
   assert.equal(state.lastError, "The run should not be marked done yet.");
   await assert.rejects(fs.access(path.join(paths.reportsRoot, "done", `${spec.specId}.md`)));
+});
+
+test("executeSpec normalizes legacy run state and starts fresh threads when policy metadata is missing", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "1357913579135791357913579135791357913579";
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "planning",
+      currentIteration: 1,
+      runId: "legacy-run",
+      worktreePath: expectedWorktreePath,
+      updatedAt: "2026-04-07T09:00:00.000Z",
+      threads: {
+        planningSpec: "legacy-planning-spec",
+        planningRepo: "legacy-planning-repo",
+      },
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Single pass.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed one attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.equal(fakeCodex.threadConfigs[0]?.method, "start");
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.stateVersion, 2);
+  assert.equal(state.threads.planningSpec, "thread-0");
+  assert.ok(state.threadPolicies.planningSpec);
+});
+
+test("executeSpec starts a fresh thread when persisted thread policy metadata mismatches", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "2468024680246802468024680246802468024680";
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "planning",
+      currentIteration: 0,
+      runId: "saved-run",
+      worktreePath: expectedWorktreePath,
+      updatedAt: "2026-04-07T09:00:00.000Z",
+      threads: {
+        planningSpec: "stale-planning-spec",
+      },
+      threadPolicies: {
+        planningSpec: "wrong-policy",
+      },
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Single pass.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed one attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: "gpt-5.3-codex", maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.equal(fakeCodex.threadConfigs[0]?.method, "start");
+  assert.equal(fakeCodex.threadConfigs[0]?.threadId, "thread-0");
+});
+
+test("executeSpec persists invalidation-cleared state before continuing", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "abcdef0123456789abcdef0123456789abcdef01";
+  const invalidationReason = "The first plan targeted the wrong files.";
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "First plan targets the wrong file.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Change the wrong thing first."],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed the first attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "changes_requested",
+      summary: "The plan was wrong.",
+      findings: [
+        {
+          severity: "error",
+          category: "tests",
+          title: "Wrong target",
+          detail: "The first plan changed the wrong area.",
+          action: "Re-plan around the right files.",
+        },
+      ],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "invalidate_plan",
+      summary: invalidationReason,
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: ["Re-plan around the right files."],
+    }),
+  ]);
+
+  await assert.rejects(
+    executeSpec(
+      paths,
+      { workspaceRoot, projectRoot, model: undefined, maxIterations: 2, dryRun: false, specFilters: [] },
+      spec,
+      fakeWorkflowDeps(fakeCodex, {
+        onProgress: (event) => {
+          if (event.summary === `plan invalidated: ${invalidationReason}`) {
+            throw new Error("interrupt after invalidation");
+          }
+        },
+      }),
+    ),
+    /interrupt after invalidation/,
+  );
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.invalidationReason, invalidationReason);
+  assert.equal(state.threads.planningSpec, undefined);
+  assert.equal(state.threads.planningRepo, undefined);
+  assert.equal(state.threads.planningRisks, undefined);
+  assert.equal(state.threads.supervisor, undefined);
+  assert.equal(state.threads.understander, undefined);
+  assert.equal(state.threads.implementer, undefined);
+  assert.equal(state.threads.reviewerCorrectness, undefined);
+  assert.equal(state.threads.reviewerTests, undefined);
+  assert.equal(state.threads.reviewLead, undefined);
+  assert.equal(state.threads.recheck, undefined);
+});
+
+test("executeSpec sends recheck the real reviewer reports plus the review lead summary", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "0123456789abcdef0123456789abcdef01234567";
+  const reviewLeadSummary = "Synthesis: tests concerns remain unresolved.";
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Single pass.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed one attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "changes_requested",
+      summary: "Raw reviewer report must survive.",
+      findings: [
+        {
+          severity: "warning",
+          category: "tests",
+          title: "Missing verification",
+          detail: "Reviewer found missing verification coverage.",
+          action: "Add the missing verification coverage.",
+        },
+      ],
+    }),
+    reviewLeadReadyResponse(reviewLeadSummary),
+    JSON.stringify({
+      verdict: "needs_fix",
+      summary: "Address the accepted reviewer findings.",
+      acceptedFindings: [
+        {
+          severity: "warning",
+          category: "tests",
+          title: "Missing verification",
+          detail: "Reviewer found missing verification coverage.",
+          action: "Add the missing verification coverage.",
+        },
+      ],
+      rejectedFindings: [],
+      fixInstructions: ["Add the missing verification coverage."],
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "failed");
+  const recheckPrompt = fakeCodex.prompts.find((entry) => entry.prompt.includes("You are the understander re-check agent for Ralph."));
+  assert.ok(recheckPrompt?.prompt.includes("Review lead summary:"));
+  assert.ok(recheckPrompt?.prompt.includes(reviewLeadSummary));
+  assert.ok(recheckPrompt?.prompt.includes("Raw reviewer report must survive."));
+  assert.ok(recheckPrompt?.prompt.includes("Reviewer found missing verification coverage."));
 });

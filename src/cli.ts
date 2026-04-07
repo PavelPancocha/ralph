@@ -83,8 +83,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (token === "--model") {
-      args.model = rest[index + 1] ?? args.model;
-      index += 1;
+      const modelValue = rest[index + 1];
+      if (!modelValue || modelValue.startsWith("--")) {
+        parseError ??= "Missing --model value";
+      } else {
+        args.model = modelValue;
+        index += 1;
+      }
       continue;
     }
     if (token === "--max-iterations") {

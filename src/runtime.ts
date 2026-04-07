@@ -5,6 +5,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import type {
+  AgentThreadPolicies,
+  AgentThreadRefs,
   ImplementationReport,
   ReviewFinding,
   RuntimePaths,
@@ -14,6 +16,127 @@ import type {
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+const runStateVersion = 2;
+
+function emptyThreadRefs(): AgentThreadRefs {
+  return {
+    planningSpec: undefined,
+    planningRepo: undefined,
+    planningRisks: undefined,
+    supervisor: undefined,
+    understander: undefined,
+    implementer: undefined,
+    reviewerCorrectness: undefined,
+    reviewerTests: undefined,
+    reviewerSecurity: undefined,
+    reviewerPerformance: undefined,
+    reviewLead: undefined,
+    recheck: undefined,
+  };
+}
+
+function emptyThreadPolicies(): AgentThreadPolicies {
+  return {
+    planningSpec: undefined,
+    planningRepo: undefined,
+    planningRisks: undefined,
+    supervisor: undefined,
+    understander: undefined,
+    implementer: undefined,
+    reviewerCorrectness: undefined,
+    reviewerTests: undefined,
+    reviewerSecurity: undefined,
+    reviewerPerformance: undefined,
+    reviewLead: undefined,
+    recheck: undefined,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function normalizeThreads(raw: unknown): AgentThreadRefs {
+  const value = isRecord(raw) ? raw : {};
+  return {
+    planningSpec: stringOrUndefined(value.planningSpec),
+    planningRepo: stringOrUndefined(value.planningRepo),
+    planningRisks: stringOrUndefined(value.planningRisks),
+    supervisor: stringOrUndefined(value.supervisor),
+    understander: stringOrUndefined(value.understander),
+    implementer: stringOrUndefined(value.implementer),
+    reviewerCorrectness: stringOrUndefined(value.reviewerCorrectness),
+    reviewerTests: stringOrUndefined(value.reviewerTests),
+    reviewerSecurity: stringOrUndefined(value.reviewerSecurity),
+    reviewerPerformance: stringOrUndefined(value.reviewerPerformance),
+    reviewLead: stringOrUndefined(value.reviewLead),
+    recheck: stringOrUndefined(value.recheck),
+  };
+}
+
+function normalizeThreadPolicies(raw: unknown): AgentThreadPolicies {
+  const value = isRecord(raw) ? raw : {};
+  return {
+    planningSpec: stringOrUndefined(value.planningSpec),
+    planningRepo: stringOrUndefined(value.planningRepo),
+    planningRisks: stringOrUndefined(value.planningRisks),
+    supervisor: stringOrUndefined(value.supervisor),
+    understander: stringOrUndefined(value.understander),
+    implementer: stringOrUndefined(value.implementer),
+    reviewerCorrectness: stringOrUndefined(value.reviewerCorrectness),
+    reviewerTests: stringOrUndefined(value.reviewerTests),
+    reviewerSecurity: stringOrUndefined(value.reviewerSecurity),
+    reviewerPerformance: stringOrUndefined(value.reviewerPerformance),
+    reviewLead: stringOrUndefined(value.reviewLead),
+    recheck: stringOrUndefined(value.recheck),
+  };
+}
+
+function normalizeStatus(value: unknown): RunState["status"] {
+  switch (value) {
+    case "queued":
+    case "planning":
+    case "implementing":
+    case "reviewing":
+    case "rechecking":
+    case "done":
+    case "failed":
+      return value;
+    default:
+      return "queued";
+  }
+}
+
+function normalizeIteration(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function normalizeRunState(raw: unknown, specIdFallback: string): RunState | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+
+  return {
+    stateVersion: runStateVersion,
+    specId: stringOrUndefined(raw.specId) ?? specIdFallback,
+    specRel: stringOrUndefined(raw.specRel) ?? "",
+    status: normalizeStatus(raw.status),
+    currentIteration: normalizeIteration(raw.currentIteration),
+    runId: stringOrUndefined(raw.runId),
+    worktreePath: stringOrUndefined(raw.worktreePath),
+    lastCommit: stringOrUndefined(raw.lastCommit),
+    lastError: stringOrUndefined(raw.lastError),
+    updatedAt: stringOrUndefined(raw.updatedAt) ?? new Date().toISOString(),
+    threads: normalizeThreads(raw.threads),
+    threadPolicies: normalizeThreadPolicies(raw.threadPolicies),
+    legacyDoneDetected: raw.legacyDoneDetected === true,
+    invalidationReason: stringOrUndefined(raw.invalidationReason),
+  };
+}
 
 function utcStamp(): string {
   return new Date().toISOString().replaceAll(":", "").replaceAll(".", "").replace("T", "-").replace("Z", "");
@@ -56,7 +179,15 @@ export async function loadRunState(paths: RuntimePaths, specId: string): Promise
   const statePath = path.join(paths.stateRoot, `${specId}.json`);
   try {
     const raw = await fs.readFile(statePath, "utf8");
-    return JSON.parse(raw) as RunState;
+    const normalized = normalizeRunState(JSON.parse(raw) as unknown, specId);
+    if (!normalized) {
+      return null;
+    }
+    const serialized = `${JSON.stringify(normalized, null, 2)}\n`;
+    if (raw !== serialized) {
+      await fs.writeFile(statePath, serialized, "utf8");
+    }
+    return normalized;
   } catch {
     return null;
   }
@@ -355,8 +486,10 @@ export async function listRunStates(paths: RuntimePaths): Promise<RunState[]> {
     if (!entry.isFile() || !entry.name.endsWith(".json")) {
       continue;
     }
-    const state = await readJsonFile<RunState>(path.join(paths.stateRoot, entry.name));
-    states.push(state);
+    const state = await loadRunState(paths, path.basename(entry.name, ".json"));
+    if (state) {
+      states.push(state);
+    }
   }
   states.sort((a, b) => a.specId.localeCompare(b.specId));
   return states;
@@ -364,6 +497,7 @@ export async function listRunStates(paths: RuntimePaths): Promise<RunState[]> {
 
 export function initialRunState(spec: SpecDocument, legacyDoneDetected: boolean): RunState {
   return {
+    stateVersion: runStateVersion,
     specId: spec.specId,
     specRel: spec.relFromSpecs,
     status: legacyDoneDetected ? "done" : "queued",
@@ -373,21 +507,10 @@ export function initialRunState(spec: SpecDocument, legacyDoneDetected: boolean)
     lastCommit: undefined,
     lastError: undefined,
     updatedAt: new Date().toISOString(),
-    threads: {
-      planningSpec: undefined,
-      planningRepo: undefined,
-      planningRisks: undefined,
-      supervisor: undefined,
-      understander: undefined,
-      implementer: undefined,
-      reviewerCorrectness: undefined,
-      reviewerTests: undefined,
-      reviewerSecurity: undefined,
-      reviewerPerformance: undefined,
-      reviewLead: undefined,
-      recheck: undefined,
-    },
+    threads: emptyThreadRefs(),
+    threadPolicies: emptyThreadPolicies(),
     legacyDoneDetected,
+    invalidationReason: undefined,
   };
 }
 

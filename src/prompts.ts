@@ -272,7 +272,8 @@ export function buildReviewLeadPrompt(
 
   return [
     "You are Ralph's review lead.",
-    "Synthesize the reviewer reports into the final review packet for recheck.",
+    "Synthesize the reviewer reports into a concise summary for recheck.",
+    "Do not replace or rewrite reviewer findings; the raw reviewer reports will be passed to recheck separately.",
     allowFollowUp
       ? "If one or more reviewer topics need materially deeper investigation, request targeted follow-up only for those topics."
       : "No more follow-up is allowed in this turn. You must return a final synthesized review packet.",
@@ -298,6 +299,7 @@ export function buildRecheckPrompt(
   understanding: UnderstandingPacket,
   implementation: ImplementationReport,
   reviewerReports: ReviewerReport[],
+  reviewLeadSummary: string,
   worktreePath: string,
 ): string {
   const findings = reviewerReports
@@ -323,6 +325,9 @@ export function buildRecheckPrompt(
     "",
     "Implementer report:",
     implementation.summary,
+    "",
+    "Review lead summary:",
+    reviewLeadSummary,
     "",
     "Reviewer reports:",
     findings || "(none)",

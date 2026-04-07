@@ -99,6 +99,11 @@ test("parseArgs leaves model unset when --model is omitted so smart role policy 
   assert.equal(parsed.model, undefined);
 });
 
+test("parseArgs rejects --model when the explicit value is missing", () => {
+  assert.equal(parseArgs(["run", "--model"]).parseError, "Missing --model value");
+  assert.equal(parseArgs(["run", "--model", "--dry-run"]).parseError, "Missing --model value");
+});
+
 test("create-spec scaffolds a spec with required and recommended sections", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-"));
   await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });

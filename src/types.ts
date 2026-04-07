@@ -77,7 +77,23 @@ export interface AgentThreadRefs {
   recheck: string | undefined;
 }
 
+export interface AgentThreadPolicies {
+  planningSpec: string | undefined;
+  planningRepo: string | undefined;
+  planningRisks: string | undefined;
+  supervisor: string | undefined;
+  understander: string | undefined;
+  implementer: string | undefined;
+  reviewerCorrectness: string | undefined;
+  reviewerTests: string | undefined;
+  reviewerSecurity: string | undefined;
+  reviewerPerformance: string | undefined;
+  reviewLead: string | undefined;
+  recheck: string | undefined;
+}
+
 export interface RunState {
+  stateVersion: number;
   specId: string;
   specRel: string;
   status:
@@ -95,7 +111,9 @@ export interface RunState {
   lastError: string | undefined;
   updatedAt: string;
   threads: AgentThreadRefs;
+  threadPolicies: AgentThreadPolicies;
   legacyDoneDetected: boolean;
+  invalidationReason: string | undefined;
 }
 
 export type WorkflowProgressPhase =
@@ -192,7 +210,6 @@ export interface ReviewerReport {
 export interface ReviewLeadReport {
   status: "ready_for_recheck" | "needs_targeted_follow_up";
   summary: string;
-  reviews: ReviewerReport[];
   followUpReviewers: Array<"correctness" | "tests" | "security" | "performance">;
 }
 

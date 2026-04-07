@@ -105,7 +105,6 @@ const reviewerReportSchema = z.object({
 const reviewLeadReportSchema = z.object({
   status: z.enum(["ready_for_recheck", "needs_targeted_follow_up"]),
   summary: z.string(),
-  reviews: z.array(reviewerReportSchema),
   followUpReviewers: z.array(z.enum(["correctness", "tests", "security", "performance"])),
 });
 
@@ -266,17 +265,12 @@ const reviewLeadReportOutputSchema: StructuredOutputSchema<ReviewLeadReport> = {
     properties: {
       status: { type: "string", enum: ["ready_for_recheck", "needs_targeted_follow_up"] },
       summary: { type: "string" },
-      reviews: {
-        type: "array",
-        minItems: 1,
-        items: reviewerReportOutputSchema.json,
-      },
       followUpReviewers: {
         type: "array",
         items: { type: "string", enum: ["correctness", "tests", "security", "performance"] },
       },
     },
-    required: ["status", "summary", "reviews", "followUpReviewers"],
+    required: ["status", "summary", "followUpReviewers"],
     additionalProperties: false,
   },
 };
@@ -547,6 +541,18 @@ function roleStateKey(role: RoleExecutionOptions["role"]): keyof RunState["threa
   }
 }
 
+function rolePolicyFingerprint(options: RoleExecutionOptions): string {
+  return JSON.stringify({
+    role: options.role,
+    model: options.model,
+    workingDirectory: path.resolve(options.workingDirectory),
+    additionalDirectories: [...(options.additionalDirectories ?? [])].map((dir) => path.resolve(dir)).sort(),
+    sandboxMode: options.sandboxMode,
+    approvalPolicy: options.approvalPolicy,
+    reasoningEffort: options.reasoningEffort,
+  });
+}
+
 async function runStructuredTurn<T>(
   codex: CodexLike,
   paths: RuntimePaths,
@@ -558,7 +564,17 @@ async function runStructuredTurn<T>(
   prompt: string,
 ): Promise<AgentRunArtifact<T>> {
   const threadKey = roleStateKey(options.role);
-  const existingThreadId = options.forceFreshThread ? undefined : state.threads[threadKey];
+  const policyFingerprint = rolePolicyFingerprint(options);
+  const persistedThreadId = options.forceFreshThread ? undefined : state.threads[threadKey];
+  const persistedThreadPolicy = state.threadPolicies[threadKey];
+  const existingThreadId =
+    persistedThreadId && persistedThreadPolicy === policyFingerprint ? persistedThreadId : undefined;
+  if (persistedThreadId && !existingThreadId) {
+    state.threads[threadKey] = undefined;
+    state.threadPolicies[threadKey] = undefined;
+    state.updatedAt = new Date().toISOString();
+    await saveRunState(paths, state);
+  }
   const thread = existingThreadId
     ? codex.resumeThread(existingThreadId as string, roleThreadOptions(options))
     : codex.startThread(roleThreadOptions(options));
@@ -567,8 +583,10 @@ async function runStructuredTurn<T>(
   if (thread.id === null) {
     console.warn(`[ralph] Thread id missing for role=${options.role}, spec=${spec.specId}; resume context may be lost.`);
     state.threads[threadKey] = undefined;
+    state.threadPolicies[threadKey] = undefined;
   } else {
     state.threads[threadKey] = thread.id;
+    state.threadPolicies[threadKey] = policyFingerprint;
   }
   state.updatedAt = new Date().toISOString();
   await saveRunState(paths, state);
@@ -627,7 +645,9 @@ async function emitProgress(
 }
 
 function clearRoleThread(state: RunState, role: RoleExecutionOptions["role"]): void {
-  state.threads[roleStateKey(role)] = undefined;
+  const threadKey = roleStateKey(role);
+  state.threads[threadKey] = undefined;
+  state.threadPolicies[threadKey] = undefined;
 }
 
 function clearPlanningThreads(state: RunState): void {
@@ -696,7 +716,7 @@ export async function executeSpec(
   const implementationCandidateValidator = deps.validateImplementationCandidate ?? validateImplementationCandidate;
   const codex = codexFactory(paths, resolveModel(options.model, defaultPrimaryModel));
 
-  let invalidationReason: string | undefined;
+  let invalidationReason = state.invalidationReason;
   let acceptedFindings: ReviewFinding[] = [];
   let implementationReport: ImplementationReport | undefined;
   let understandingPacket: UnderstandingPacket | undefined;
@@ -751,13 +771,19 @@ export async function executeSpec(
       buildSupervisorPrompt(spec, worktreePath, planningViews, invalidationReason),
     );
     plannedReviewerRoles = mergeReviewerRoles(defaultReviewerRoles, supervisorStrategy.output.reviewerRoles);
+    if (state.invalidationReason) {
+      state.invalidationReason = undefined;
+      state.updatedAt = new Date().toISOString();
+      await saveRunState(paths, state);
+    }
     shouldReplan = false;
   };
 
   for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
     state.currentIteration = iteration;
+    const currentInvalidationReason = invalidationReason;
     if (shouldReplan) {
-      await runPlanningCycle(invalidationReason !== undefined);
+      await runPlanningCycle(currentInvalidationReason !== undefined);
     }
     if (!supervisorStrategy) {
       throw new Error(`Supervisor strategy missing for spec ${spec.specId}`);
@@ -779,8 +805,11 @@ export async function executeSpec(
       runId,
       understanderOptions(options.model, worktreePath, additionalDirectories),
       understandingPacketOutputSchema,
-      buildUnderstanderPrompt(spec, worktreePath, supervisorStrategy.output, planningViews, invalidationReason),
+      buildUnderstanderPrompt(spec, worktreePath, supervisorStrategy.output, planningViews, currentInvalidationReason),
     );
+    if (currentInvalidationReason !== undefined && state.invalidationReason === undefined) {
+      invalidationReason = undefined;
+    }
     understandingPacket = understanding.output;
     await writeHumanArtifact(
       paths,
@@ -889,16 +918,7 @@ export async function executeSpec(
       reviewLeadReportOutputSchema,
       buildReviewLeadPrompt(spec, understanding.output, implementation.output, reviewerOutputs, worktreePath, true),
     );
-
-    const finalReviewerMap = new Map<ReviewerReport["reviewer"], ReviewerReport>(
-      reviewerOutputs.map((report) => [report.reviewer, report]),
-    );
-    for (const review of reviewLead.output.reviews) {
-      if (!plannedReviewerRoles.includes(review.reviewer)) {
-        throw new Error(`Review lead returned unexpected reviewer ${review.reviewer} for spec ${spec.specId}`);
-      }
-      finalReviewerMap.set(review.reviewer, review);
-    }
+    const finalReviewerMap = new Map<ReviewerReport["reviewer"], ReviewerReport>(reviewerOutputs.map((report) => [report.reviewer, report]));
 
     if (reviewLead.output.status === "needs_targeted_follow_up") {
       const followUpReviewers = reviewLead.output.followUpReviewers.filter((reviewer) => plannedReviewerRoles.includes(reviewer));
@@ -954,12 +974,6 @@ export async function executeSpec(
       if (reviewLead.output.status !== "ready_for_recheck") {
         throw new Error(`Review lead requested more than one targeted follow-up round for spec ${spec.specId}`);
       }
-      for (const review of reviewLead.output.reviews) {
-        if (!plannedReviewerRoles.includes(review.reviewer)) {
-          throw new Error(`Review lead returned unexpected reviewer ${review.reviewer} for spec ${spec.specId}`);
-        }
-        finalReviewerMap.set(review.reviewer, review);
-      }
     }
 
     const finalReviewerOutputs = plannedReviewerRoles.map((reviewer) => {
@@ -985,7 +999,14 @@ export async function executeSpec(
       runId,
       recheckOptions(options.model, worktreePath, additionalDirectories),
       recheckVerdictOutputSchema,
-      buildRecheckPrompt(spec, understanding.output, implementation.output, finalReviewerOutputs, worktreePath),
+      buildRecheckPrompt(
+        spec,
+        understanding.output,
+        implementation.output,
+        finalReviewerOutputs,
+        reviewLead.output.summary,
+        worktreePath,
+      ),
     );
     recheckVerdict = recheck.output;
     acceptedFindings = recheck.output.acceptedFindings;
@@ -995,6 +1016,7 @@ export async function executeSpec(
     }
     if (recheck.output.verdict === "invalidate_plan") {
       invalidationReason = recheck.output.summary;
+      state.invalidationReason = recheck.output.summary;
       acceptedFindings = [];
       clearPlanningThreads(state);
       clearRoleThread(state, "supervisor");
@@ -1003,6 +1025,8 @@ export async function executeSpec(
       clearReviewThreads(state);
       clearRoleThread(state, "recheck");
       shouldReplan = true;
+      state.updatedAt = new Date().toISOString();
+      await saveRunState(paths, state);
       await emitProgress(paths, spec, runId, deps, {
         phase: "planning",
         iteration,
