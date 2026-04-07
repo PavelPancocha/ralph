@@ -658,6 +658,13 @@ function clearReviewThreads(state: RunState): void {
   clearRoleThread(state, "review_lead");
 }
 
+async function failWorkflowState(paths: RuntimePaths, state: RunState, message: string): Promise<never> {
+  state.status = "failed";
+  state.lastError = message;
+  await saveRunState(paths, state);
+  throw new Error(message);
+}
+
 export async function executeSpec(
   paths: RuntimePaths,
   options: RalphRunOptions,
@@ -882,7 +889,9 @@ export async function executeSpec(
         buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath, false),
       );
       if (reviewerReport.output.reviewer !== reviewer) {
-        throw new Error(
+        await failWorkflowState(
+          paths,
+          state,
           `Reviewer output mismatch for spec ${spec.specId}: expected ${reviewer}, got ${reviewerReport.output.reviewer}`,
         );
       }
@@ -909,7 +918,11 @@ export async function executeSpec(
     if (reviewLead.output.status === "needs_targeted_follow_up") {
       const followUpReviewers = reviewLead.output.followUpReviewers.filter((reviewer) => plannedReviewerRoles.includes(reviewer));
       if (followUpReviewers.length === 0) {
-        throw new Error(`Review lead requested follow-up without valid reviewer roles for spec ${spec.specId}`);
+        await failWorkflowState(
+          paths,
+          state,
+          `Review lead requested follow-up without valid reviewer roles for spec ${spec.specId}`,
+        );
       }
       for (const reviewer of followUpReviewers) {
         await emitProgress(paths, spec, runId, deps, {
@@ -929,7 +942,9 @@ export async function executeSpec(
           buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath, true),
         );
         if (reviewerReport.output.reviewer !== reviewer) {
-          throw new Error(
+          await failWorkflowState(
+            paths,
+            state,
             `Reviewer output mismatch for spec ${spec.specId}: expected ${reviewer}, got ${reviewerReport.output.reviewer}`,
           );
         }
@@ -958,7 +973,11 @@ export async function executeSpec(
         ),
       );
       if (reviewLead.output.status !== "ready_for_recheck") {
-        throw new Error(`Review lead requested more than one targeted follow-up round for spec ${spec.specId}`);
+        await failWorkflowState(
+          paths,
+          state,
+          `Review lead requested more than one targeted follow-up round for spec ${spec.specId}`,
+        );
       }
     }
 
@@ -1003,6 +1022,8 @@ export async function executeSpec(
     if (recheck.output.verdict === "invalidate_plan") {
       invalidationReason = recheck.output.summary;
       state.invalidationReason = recheck.output.summary;
+      state.lastCommit = undefined;
+      state.status = "planning";
       acceptedFindings = [];
       clearPlanningThreads(state);
       clearRoleThread(state, "supervisor");

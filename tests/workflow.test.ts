@@ -1756,6 +1756,7 @@ test("executeSpec keeps invalidation reason persisted after replanning resumes",
 
   const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
   assert.equal(state.invalidationReason, invalidationReason);
+  assert.equal(state.lastCommit, undefined);
   assert.ok(state.threads.planningSpec);
   assert.ok(state.threads.planningRepo);
   assert.ok(state.threads.planningRisks);
@@ -1820,6 +1821,10 @@ test("executeSpec rejects out-of-plan review lead follow-up requests", async () 
     ),
     /Review lead requested follow-up without valid reviewer roles/,
   );
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.status, "failed");
+  assert.match(state.lastError ?? "", /Review lead requested follow-up without valid reviewer roles/);
 });
 
 test("executeSpec sends recheck the real reviewer reports plus the review lead summary", async () => {
