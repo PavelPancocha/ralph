@@ -132,7 +132,6 @@ export interface ImplementationReport {
   verificationCommands: string[];
   verificationSummary: string;
   concerns: string[];
-  reviewerHandover: string;
 }
 
 export interface ReviewFinding {

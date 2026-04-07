@@ -163,8 +163,6 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
       verificationCommands: ["git status --short"],
       verificationSummary: "Verified locally.",
       concerns: [],
-      reviewerHandover:
-        "What I did: updated README.md only. Motivation: keep the implementation aligned with the tiny safe change requested by the spec. What to check: confirm README.md is the only modified file and matches the requested goal. Potential gaps: no broader docs cleanup was attempted.",
     }),
     JSON.stringify({
       reviewer: "correctness",

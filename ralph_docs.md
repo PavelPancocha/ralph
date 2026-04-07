@@ -218,15 +218,6 @@ Important payloads:
 
 This is the main runtime shift from the old Ralph loop.
 
-The `ImplementationReport` now also includes a free-text reviewer handover covering:
-
-- what you did
-- motivations
-- what to check
-- potential gaps
-
-This gives reviewers a compact implementation-to-review handoff instead of forcing them to infer intent from diffs alone.
-
 ## Worktree Behavior
 
 Each spec gets a stable worktree path:

@@ -122,7 +122,6 @@ export function buildImplementerPrompt(
     "- Report the exact 40-character commit hash.",
     "- List changed files.",
     "- Summarize verification evidence honestly.",
-    "- Provide a free-text reviewer handover covering: what you did, motivations, what to check, and potential gaps.",
   ].join("\n");
 }
 
@@ -152,9 +151,6 @@ export function buildReviewerPrompt(
     "",
     "Changed files:",
     ...implementation.changedFiles.map((item) => `- ${item}`),
-    "",
-    "Reviewer handover:",
-    implementation.reviewerHandover,
     "",
     "Return either approval or actionable findings.",
   ].join("\n");

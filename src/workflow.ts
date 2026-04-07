@@ -75,7 +75,6 @@ const implementationReportSchema = z.object({
   verificationCommands: z.array(z.string()),
   verificationSummary: z.string(),
   concerns: z.array(z.string()),
-  reviewerHandover: z.string(),
 });
 
 const reviewFindingSchema = z.object({
@@ -280,7 +279,6 @@ function schemaToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
         verificationCommands: { type: "array", items: { type: "string" } },
         verificationSummary: { type: "string" },
         concerns: { type: "array", items: { type: "string" } },
-        reviewerHandover: { type: "string" },
       },
       required: [
         "summary",
@@ -289,7 +287,6 @@ function schemaToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
         "verificationCommands",
         "verificationSummary",
         "concerns",
-        "reviewerHandover",
       ],
       additionalProperties: false,
     };
