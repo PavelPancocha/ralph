@@ -2,3 +2,8 @@
 /runs/
 /SCRATCHPAD.md
 /ralph.log
+/node_modules/
+/dist/
+/.ralph/
+/coverage/
+__pycache__/

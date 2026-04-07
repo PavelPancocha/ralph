@@ -1,0 +1,24 @@
+model = "gpt-5.3-codex"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+hide_agent_reasoning = false
+
+[features]
+codex_hooks = true
+multi_agent = true
+unified_exec = true
+
+[agents.understander]
+description = "Read-heavy repo analyst that maps the task, target files, and risks before implementation."
+
+[agents.implementer]
+description = "Focused code-changing agent that executes the approved plan in the active worktree."
+
+[agents.reviewer_correctness]
+description = "Independent correctness reviewer that looks for regressions, logic bugs, and spec mismatches."
+
+[agents.reviewer_tests]
+description = "Independent reviewer focused on test coverage, verification quality, and missing assertions."
+
+[agents.recheck]
+description = "Read-only reconciliation agent that validates findings and decides whether the implementation is done."

@@ -1,322 +1,355 @@
 Copyright (C) 2026 Zemtu OG
 
-# Ralph Driven Development (RDD) — Candidate → Verify → Done
+# Ralph v2 Architecture
 
-This repo folder is **`ralph/`**. Everything Ralph needs lives here. The runner executes specs with Codex in a loop, but **a spec is only marked done after an independent verification run passes**.
+This document describes the current Ralph implementation in this repository: the SDK-native Node/TypeScript runner, not the older Python loop.
 
----
+## Summary
 
-## Directory Layout
+Ralph is a local spec runner that:
 
+- reads markdown specs from `specs/`
+- resolves the target repository from `Repo:` and `Workdir:`
+- creates one isolated git worktree per spec
+- runs a supervised multi-agent Codex workflow
+- stores runtime state and artifacts under `.ralph/`
+- marks successful specs with a done report under `.ralph/reports/done/`
+
+The design goal is to preserve the old Ralph feel, meaning a file-first backlog and inspectable local artifacts, while replacing the runtime with the official Codex SDK and a stronger role-based loop.
+
+## High-Level Flow
+
+For a runnable spec, Ralph executes this sequence:
+
+1. `supervisor`
+   Chooses the review strategy and reviewer set.
+2. `understander`
+   Reads the spec and repository, then emits an `UnderstandingPacket`.
+3. `implementer`
+   Applies the change in the active worktree and emits an `ImplementationReport`.
+4. `reviewers`
+   Review the candidate implementation. `correctness` and `tests` are expected by default; `security` and `performance` are available when requested.
+5. `recheck`
+   Accepts or rejects reviewer findings and returns one of:
+   - `approve`
+   - `needs_fix`
+   - `invalidate_plan`
+6. `supervisor`
+   Produces the final `SupervisorOutcome`.
+
+If recheck returns `needs_fix`, the loop continues until `maxIterations` is reached.
+
+If recheck returns `invalidate_plan`, Ralph clears the understander/implementer/reviewer thread references and starts a fresh planning pass inside the same spec run.
+
+## Source Layout
+
+```text
+src/
+├── cli.ts         # Command-line interface
+├── prompts.ts     # Prompt builders for each role
+├── runtime.ts     # Runtime paths, state, worktree management, artifacts
+├── specs.ts       # Spec discovery and parsing
+├── types.ts       # Shared types
+└── workflow.ts    # Codex SDK orchestration
 ```
-ralph/
-  ralph.py
-  SCRATCHPAD.md
-  runs/
-    <spec_id>/<UTC_TIMESTAMP>/
-      impl-attempt-1.log
-      verify.log
-      ...
-  specs/
-    0001-seed.md
-    area/0002-feature.md
-    candidates/
-      0001-seed.json
-      area/0002-feature.json
-    done/
-      0001-seed.md
-      area/0002-feature.md
-  ralph.log
+
+### Key modules
+
+#### `src/cli.ts`
+
+Provides the public CLI:
+
+- `run`
+- `status`
+- `inspect`
+- `create-spec`
+
+It parses command-line flags, loads specs, creates runtime directories, and calls `executeSpec(...)`.
+
+#### `src/specs.ts`
+
+Responsible for:
+
+- discovering runnable specs under `specs/`
+- ignoring legacy state directories such as `done`, `plans`, `sessions`, and `candidates`
+- parsing markdown sections into a normalized `SpecDocument`
+
+The parser keeps compatibility with the existing spec backlog format.
+
+#### `src/runtime.ts`
+
+Responsible for:
+
+- building `.ralph/` paths
+- loading and saving run state
+- writing artifacts and done reports
+- resolving repository paths from workspace-relative spec metadata
+- creating and reusing git worktrees
+- copying `codex-support/` into the worktree as `.codex/`
+
+#### `src/prompts.ts`
+
+Builds the role-specific prompt payloads for:
+
+- supervisor strategy
+- understander
+- implementer
+- reviewer
+- recheck
+- supervisor final outcome
+
+#### `src/workflow.ts`
+
+Implements the orchestration loop around `@openai/codex-sdk`.
+
+It:
+
+- creates or resumes Codex threads per role
+- enforces structured outputs with schemas
+- persists thread ids in run state
+- writes structured JSON artifacts for each turn
+- loops review/recheck iterations
+- writes the final done report on success
+
+## Runtime Layout
+
+The active runtime root is `.ralph/`.
+
+```text
+.ralph/
+├── artifacts/
+│   └── <spec-id>/<run-id>/
+├── reports/
+│   └── done/
+├── runs/
+├── sessions/
+├── state/
+│   └── <spec-id>.json
+└── worktrees/
+    └── <spec-id>/
 ```
 
-### What each folder/file is for
+### What each area means
 
-* **`specs/`**
-  Your spec backlog. Specs can be nested into subfolders. Only files with names like `0001-*.md` are treated as runnable specs.
+- `.ralph/state/<spec-id>.json`
+  The authoritative per-spec state file.
+- `.ralph/artifacts/<spec-id>/<run-id>/`
+  Structured outputs from every role, plus human-readable understanding artifacts.
+- `.ralph/reports/done/<spec-id>.md`
+  Final success report.
+- `.ralph/worktrees/<spec-id>/`
+  The isolated git worktree for the spec.
 
-* **`specs/candidates/`**
-  “Candidate completion” markers produced after the implementer run prints a commit hash + magic phrase. These mirror `specs/` structure as JSON files.
+`runs/` and `sessions/` already exist as part of the runtime structure even though the current implementation does not yet use them heavily.
 
-* **`specs/done/`**
-  Verified completion markers. These mirror `specs/` structure as Markdown files and include the **candidate commit hash** that was verified.
+## Spec Contract
 
-* **`runs/`**
-  Full output logs per attempt (implementation + verification), grouped by `spec_id` and timestamp.
+Ralph still expects specs to be markdown files named with a numeric prefix such as:
 
-* **`SCRATCHPAD.md`**
-  A shared handover / memory file used by both implementer and verifier. The agent is expected to read and update it.
+- `0001-seed.md`
+- `area/0002-feature.md`
+- `1001-demo.md`
 
-* **`ralph.log`**
-  Runner events (text or JSONL depending on flag).
+The current parser recognizes:
 
----
+- preamble lines:
+  - `Repo: ...`
+  - `Workdir: ...`
+- section headers:
+  - `## Branch Instructions`
+  - `## Big Picture`
+  - `## Goal`
+  - `## Scope (In)`
+  - `## Boundaries (Out, No Overlap)`
+  - `## Boundaries (Out)`
+  - `## Constraints`
+  - `## Dependencies`
+  - `## Required Reading`
+  - `## Acceptance Criteria`
+  - `## Commit Requirements`
+  - `## Verification (Fast-First)`
 
-## How the Pipeline Works
+### Branch Instructions
 
-For each spec, Ralph uses a **two-phase contract**:
+`## Branch Instructions` is important in v2 because the worktree is branch-aware. It currently supports:
 
-### Phase A — Implementer
+- `Source branch: ...`
+- `Create branch: ...`
+- `PR target: ...`
+- `Next spec base: ...`
 
-Codex implements the spec, commits, and outputs:
+The `Source branch` and `Create branch` fields are required.
 
-1. DONE REPORT
-2. `<40-char commit hash>` (own line)
-3. `I AM HYPER SURE I AM DONE!` (final non-empty line)
+## Run State Model
 
-When Ralph sees this strict pattern, it writes a **candidate marker** to:
+The current `RunState.status` values are:
 
-* `specs/candidates/<same path as spec>.json`
+- `queued`
+- `planning`
+- `implementing`
+- `reviewing`
+- `rechecking`
+- `done`
+- `failed`
 
-### Phase B — Verifier (independent run)
+Each state file also stores:
 
-A second Codex run validates the candidate commit:
+- `currentIteration`
+- `runId`
+- `worktreePath`
+- `lastCommit`
+- `lastError`
+- `updatedAt`
+- thread ids for all agent roles
+- `legacyDoneDetected`
 
-* reads spec
-* selects correct repo
-* checks the commit exists and checks out that commit
-* runs minimal meaningful verification (agent decides; fast-first)
-* **does not modify code and does not commit**
+## Structured Outputs
 
-If verification passes, verifier outputs:
+Ralph v2 does not rely on magic phrases or stdout parsing for correctness. Instead, each role is required to return JSON matching a strict schema.
 
-1. VERIFICATION REPORT
-2. `<same 40-char candidate commit hash>` (own line)
-3. `I AM HYPER SURE I AM DONE!` (final non-empty line)
+Important payloads:
 
-Only then Ralph writes:
+- `SupervisorStrategy`
+- `UnderstandingPacket`
+- `ImplementationReport`
+- `ReviewerReport`
+- `RecheckVerdict`
+- `SupervisorOutcome`
 
-* `specs/done/<same path as spec>.md`
+This is the main runtime shift from the old Ralph loop.
 
-…and the spec is now permanently skipped unless forced.
+The `ImplementationReport` now also includes a free-text reviewer handover covering:
 
----
+- what you did
+- motivations
+- what to check
+- potential gaps
 
-## Default Settings
+This gives reviewers a compact implementation-to-review handoff instead of forcing them to infer intent from diffs alone.
 
-* **Magic phrase**:
-  `I AM HYPER SURE I AM DONE!`
+## Worktree Behavior
 
-* **Max attempts per spec** (any failure counts: impl or verify):
-  `10`
+Each spec gets a stable worktree path:
 
-* **Codex args default** (YOLO + skip git check):
+```text
+.ralph/worktrees/<spec-id>/
+```
 
-  * bypass approvals & sandbox
-  * skip git repo check
+If the worktree already exists on the expected feature branch, Ralph reuses it. Otherwise it removes the old worktree and recreates it from the source branch declared by the spec.
 
-* **Workspace root default**:
-  Parent directory of `ralph/` (so your repos can live next to `ralph/`).
+After worktree creation, Ralph copies `codex-support/` into:
 
----
+```text
+.ralph/worktrees/<spec-id>/.codex/
+```
 
-## Quick Start
+That gives every spec run its own local Codex hook/config bundle.
 
-From anywhere:
+## Legacy Compatibility
+
+What remains compatible:
+
+- existing markdown specs
+- existing spec directory layout under `specs/`
+- legacy `specs/done/...` markers as a signal to skip already-completed specs
+
+What is no longer the active runtime contract:
+
+- `python ralph/ralph.py`
+- planner/implementer/verifier magic-phrase completion parsing
+- `specs/candidates/` as the active candidate state
+- `specs/plans/` as the active planning state
+
+The old Python files are still present in the repository, but they are not the current runtime described here.
+
+## Commands
+
+### Install and verify
 
 ```bash
-python ralph/ralph.py
+npm install
+npm run check
+npm test
+npm run build
 ```
 
-Typical workspace:
-
-```
-workspace/
-  repo-a/
-  repo-b/
-  ralph/
-    ralph.py
-    specs/
-    ...
-```
-
-Ralph runs Codex with `workspace/` as the working directory by default, and the spec itself must tell the agent which repo to work in.
-
----
-
-## Writing Specs
-
-### Naming
-
-Specs must be named like:
-
-* `0001-setup.md`
-* `area/0002-api.md`
-
-Only files matching `^\d{4}-.*\.md$` are executed.
-
-### Recommended spec header
-
-Include a clear repo target to avoid ambiguity in multi-repo workspaces:
-
-```md
-# 0007 - Add webhook retries
-
-Repo: repo-a
-Workdir: repo-a
-```
-
-### Recommended structure
-
-Use a consistent, deterministic format. Avoid conditional branches in specs.
-
-```md
-## Goal
-
-## Dependencies
-- 0006-previous-spec.md
-
-## Constraints
-- Verification focus: keep code simple, readable, typed; one method/function one responsibility.
-- Any project-specific testing or style rules.
-
-## Required reading
-- <key files to read before coding>
-
-## Acceptance criteria
-- Concrete, testable bullet points.
-
-## Verification (fast-first)
-```bash
-# Targeted tests or commands
-```
-```
-
-### Best practices from current spec creation
-
-* **One spec = one logical PR.** Keep specs small and isolated so verification is fast.
-* **Deterministic steps only.** Avoid “if you find X, then maybe Y” in the spec body.
-* **Required reading helps.** List the key files to read before implementing.
-* **Constraints first.** Put code-quality expectations in Constraints.
-* **Acceptance criteria are measurable.** Tie each change to a test or observable outcome.
-* **Verification is fast-first.** Use targeted tests, then optionally list wider checks.
-* **No prep trackers in specs.** Specs should be runnable on their own.
-* **Sequence dependencies explicitly.** If a spec is a prerequisite, mark it in Dependencies.
-* **Prior implementation references are for context only.** Do not blindly reapply old code.
-
----
-
-## Seed Spec That Generates the Backlog (pattern)
-
-If you want “one spec that creates the next specs”, do it explicitly.
-
-`specs/0001-seed.md`:
-
-```md
-# 0001 - Seed backlog
-
-Repo: (none)  # this spec may only create specs; it should say so explicitly
-
-## Task
-1) Inspect the workspace and detect repos.
-2) Generate specs 0002..0010 in ralph/specs/ with:
-   - Repo: <repo-name>
-   - Acceptance criteria
-   - Verification guidance (fast-first)
-3) Update SCRATCHPAD.md with assumptions and plan.
-
-## Completion
-If you changed anything, commit in the appropriate repo (or a dedicated meta repo if you have one).
-```
-
-**Important:** The completion contract expects a commit hash line. If you want “seed spec may complete without committing”, you need to define that in your spec and adjust the contract in code accordingly (currently it requires a commit hash).
-
----
-
-## Resume Behavior
-
-Rerunning the script is safe:
-
-* If a spec has `specs/done/<spec>.md` → it is skipped.
-* If a spec has a candidate JSON but no done file → Ralph tries **verification first**.
-
-  * If verification passes → it is marked done.
-  * If verification fails → Ralph re-runs implementation using verifier feedback.
-
----
-
-## Common Commands
-
-### Basic run
+### Run
 
 ```bash
-python ralph/ralph.py
+node dist/src/cli.js run
 ```
 
-### Stream agent output live
+### Run selected specs
 
 ```bash
-python ralph/ralph.py --stream-agent-output
+node dist/src/cli.js run 1001-demo
 ```
 
-### Dry-run (no Codex calls)
+### Dry run
 
 ```bash
-python ralph/ralph.py --dry-run
+node dist/src/cli.js run --dry-run
 ```
 
-### Force re-run specific spec(s)
-
-Paths are relative to `specs/`:
+### Status
 
 ```bash
-python ralph/ralph.py --force 0003-feature.md area/0007-bugfix.md
+node dist/src/cli.js status
 ```
 
-### Override workspace root
+### Inspect parsed spec output
 
 ```bash
-python ralph/ralph.py --workspace-root /path/to/workspace
+node dist/src/cli.js inspect 1001-demo.md
 ```
 
-### Override magic phrase
+### Create a sample spec
 
 ```bash
-python ralph/ralph.py --magic-phrase "I AM HYPER SURE I AM DONE!"
+node dist/src/cli.js create-spec 1234-my-new-spec.md
+node dist/src/cli.js create-spec area/1235-follow-up-spec.md
 ```
 
-### Override max attempts
+This command creates a new markdown file under `specs/` and prepopulates it with:
 
-```bash
-python ralph/ralph.py --max-attempts-per-spec 20
-```
+- required sections the parser/runtime currently depend on
+- recommended sections that help produce better execution packets and reviews
+- placeholder branch instructions and verification blocks
 
----
+## Testing And CI
 
-## What “Done” Means Here
+The current automated test suite covers:
 
-A spec is considered done only if:
+- `tests/specs.test.ts`
+  Spec discovery and parsing behavior.
+- `tests/runtime.test.ts`
+  Runtime path and initial state behavior.
+- `tests/workflow.test.ts`
+  End-to-end supervised workflow execution using an injected fake Codex backend.
 
-1. Implementer produced a candidate commit and saved it under `specs/candidates/…`
-2. Verifier independently confirmed completion at that **exact commit**
-3. Ralph wrote `specs/done/<spec>.md` containing that commit hash
+GitHub Actions runs:
 
-This prevents “agent claims done” from becoming permanent without verification.
+1. `npm ci`
+2. `npm run check`
+3. `npm test`
+4. `npm run build`
 
----
+The workflow file is:
 
-## Troubleshooting
+- [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)
 
-### It keeps retrying the same spec
+## Operational Notes
 
-Common reasons:
+- Ralph is local-first. It expects to operate on repositories already present in the workspace.
+- The CLI currently exposes `run`, `status`, and `inspect`. There is no dedicated `resume` command yet because persistent state plus stable worktree paths already provide the base for restart-safe execution.
+- The current review loop is capped by `--max-iterations`.
+- Success is determined by structured agent outputs and the recheck verdict, not by heuristics on plain terminal output.
 
-* Agent doesn’t print the strict ending:
+## Recommended Next Documentation Updates
 
-  * `commit-hash line`
-  * `magic phrase` as last non-empty line
-* Verifier fails and keeps sending fix feedback
-* Codex exits non-zero / rate limiting
+If the runtime expands, the next docs worth adding are:
 
-Check:
-
-* `runs/<spec_id>/<timestamp>/impl-attempt-*.log`
-* `runs/<spec_id>/<timestamp>/verify.log`
-* candidate file in `specs/candidates/...`
-
-### Candidate exists but never becomes done
-
-Verifier is failing. See the verify logs and the output tail stored in the done report once it passes.
-
-### Multi-repo confusion
-
-Add `Repo:` / `Workdir:` to specs so the agent consistently `cd` into the right repo before using git.
+- a migration note from Python v1 to TypeScript v2
+- an operator guide for `.ralph/state/*.json`
+- a spec authoring guide with several real examples
+- a hook policy reference for `codex-support/`

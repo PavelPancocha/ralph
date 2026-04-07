@@ -1,0 +1,28 @@
+{
+  "name": "ralph",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SDK-native multi-agent spec runner for Codex.",
+  "bin": {
+    "ralph": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "node --import tsx ./src/cli.ts",
+    "test": "node --import tsx --test tests/**/*.test.ts"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "0.118.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
