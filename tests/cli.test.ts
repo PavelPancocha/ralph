@@ -213,3 +213,45 @@ test("runCommand streams spec-indexed progress lines and log paths during run", 
   assert.match(logOutput, /\[2\/2\] 1002-two :: 1002 - Two/);
   assert.match(logOutput, /DONE: Completed 1002-two\./);
 });
+
+test("runCommand logs the smart role policy banner when model is omitted", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-run-smart-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+
+  let logOutput = "";
+  const originalLog = console.log;
+  const previousCwd = process.cwd();
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: [],
+        workspaceRoot: tempRoot,
+        model: undefined,
+        maxIterations: 3,
+        dryRun: false,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+      },
+      {
+        executeSpec: async () => ({
+          status: "done",
+          summary: "Completed 1001-one.",
+          candidateCommit: "1234567890abcdef1234567890abcdef12345678",
+          nextAction: "none",
+        }),
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+    console.log = originalLog;
+  }
+
+  assert.match(logOutput, /Running 1 spec\(s\) with smart role policy maxIterations=3/);
+});

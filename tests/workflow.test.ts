@@ -584,6 +584,11 @@ test("executeSpec reruns only targeted reviewers at stronger policy when the rev
       ["start", "gpt-5.4", "xhigh"],
     ],
   );
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  const artifactFiles = await fs.readdir(path.join(paths.artifactsRoot, spec.specId, state.runId!));
+  assert.equal(artifactFiles.filter((name) => name.startsWith("reviewer_security-1")).length, 2);
+  assert.equal(artifactFiles.filter((name) => name.startsWith("review_lead-1")).length, 2);
 });
 
 test("executeSpec carries accepted findings into the next implementer turn on needs_fix", async () => {
@@ -1500,6 +1505,167 @@ test("executeSpec starts a fresh thread when persisted thread policy metadata mi
   assert.equal(fakeCodex.threadConfigs[0]?.threadId, "thread-0");
 });
 
+test("executeSpec keeps mismatched persisted thread state when fresh replacement start fails", async () => {
+  const { projectRoot, workspaceRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "planning",
+      currentIteration: 0,
+      runId: "saved-run",
+      worktreePath: expectedWorktreePath,
+      updatedAt: "2026-04-07T09:00:00.000Z",
+      threads: {
+        planningSpec: "stale-planning-spec",
+      },
+      threadPolicies: {
+        planningSpec: "wrong-policy",
+      },
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    executeSpec(
+      paths,
+      { workspaceRoot, projectRoot, model: "gpt-5.3-codex", maxIterations: 1, dryRun: false, specFilters: [] },
+      spec,
+      {
+        createCodex: () => ({
+          startThread: (options?: CodexThreadConfig) => {
+            assert.ok(options);
+            return {
+              id: "replacement-thread",
+              run: async () => {
+                throw new Error("synthetic start failure");
+              },
+            };
+          },
+          resumeThread: () => {
+            throw new Error("resumeThread should not be used");
+          },
+        }),
+        validateImplementationCandidate: async () => null,
+      },
+    ),
+    /synthetic start failure/,
+  );
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.threads.planningSpec, "stale-planning-spec");
+  assert.equal(state.threadPolicies.planningSpec, "wrong-policy");
+});
+
+test("executeSpec loads persisted invalidation reason and replans at escalated policy after restart", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "3141592653589793238462643383279502884197";
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "planning",
+      currentIteration: 1,
+      runId: "prior-run",
+      worktreePath: expectedWorktreePath,
+      updatedAt: "2026-04-07T09:00:00.000Z",
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+      invalidationReason: "Persisted invalidation context from earlier run.",
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Single pass after restart.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed one attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.deepEqual(
+    fakeCodex.threadConfigs.slice(0, 3).map((entry) => [entry.options?.model, entry.options?.modelReasoningEffort]),
+    [
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+    ],
+  );
+  const planningPrompts = fakeCodex.prompts.slice(0, 3).map((entry) => entry.prompt);
+  for (const prompt of planningPrompts) {
+    assert.match(prompt, /Previous plan invalidation reason: Persisted invalidation context from earlier run\./);
+  }
+});
+
 test("executeSpec keeps invalidation reason persisted after replanning resumes", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
@@ -1594,6 +1760,66 @@ test("executeSpec keeps invalidation reason persisted after replanning resumes",
   assert.ok(state.threads.planningRepo);
   assert.ok(state.threads.planningRisks);
   assert.ok(state.threads.supervisor);
+});
+
+test("executeSpec rejects out-of-plan review lead follow-up requests", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "2718281828459045235360287471352662497757";
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Single pass.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed one attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "No test issues.",
+      findings: [],
+    }),
+    reviewLeadFollowUpResponse(["security"]),
+  ]);
+
+  await assert.rejects(
+    executeSpec(
+      paths,
+      { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+      spec,
+      fakeWorkflowDeps(fakeCodex),
+    ),
+    /Review lead requested follow-up without valid reviewer roles/,
+  );
 });
 
 test("executeSpec sends recheck the real reviewer reports plus the review lead summary", async () => {

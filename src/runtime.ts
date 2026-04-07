@@ -138,6 +138,19 @@ function normalizeRunState(raw: unknown, specIdFallback: string): RunState | nul
   };
 }
 
+async function readNormalizedRunState(statePath: string, specId: string): Promise<{ raw: string; normalized: RunState } | null> {
+  try {
+    const raw = await fs.readFile(statePath, "utf8");
+    const normalized = normalizeRunState(JSON.parse(raw) as unknown, specId);
+    if (!normalized) {
+      return null;
+    }
+    return { raw, normalized };
+  } catch {
+    return null;
+  }
+}
+
 function utcStamp(): string {
   return new Date().toISOString().replaceAll(":", "").replaceAll(".", "").replace("T", "-").replace("Z", "");
 }
@@ -177,20 +190,15 @@ export async function ensureRuntimePaths(paths: RuntimePaths): Promise<void> {
 
 export async function loadRunState(paths: RuntimePaths, specId: string): Promise<RunState | null> {
   const statePath = path.join(paths.stateRoot, `${specId}.json`);
-  try {
-    const raw = await fs.readFile(statePath, "utf8");
-    const normalized = normalizeRunState(JSON.parse(raw) as unknown, specId);
-    if (!normalized) {
-      return null;
-    }
-    const serialized = `${JSON.stringify(normalized, null, 2)}\n`;
-    if (raw !== serialized) {
-      await fs.writeFile(statePath, serialized, "utf8");
-    }
-    return normalized;
-  } catch {
+  const loaded = await readNormalizedRunState(statePath, specId);
+  if (!loaded) {
     return null;
   }
+  const serialized = `${JSON.stringify(loaded.normalized, null, 2)}\n`;
+  if (loaded.raw !== serialized) {
+    await fs.writeFile(statePath, serialized, "utf8");
+  }
+  return loaded.normalized;
 }
 
 export async function saveRunState(paths: RuntimePaths, state: RunState): Promise<void> {
@@ -207,7 +215,12 @@ export async function saveArtifact(
 ): Promise<string> {
   const dir = path.join(paths.artifactsRoot, specId, runId);
   await fs.mkdir(dir, { recursive: true });
-  const absolute = path.join(dir, `${name}.json`);
+  let absolute = path.join(dir, `${name}.json`);
+  let suffix = 2;
+  while (await pathExists(absolute)) {
+    absolute = path.join(dir, `${name}-${suffix}.json`);
+    suffix += 1;
+  }
   await fs.writeFile(absolute, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   return absolute;
 }
@@ -486,9 +499,10 @@ export async function listRunStates(paths: RuntimePaths): Promise<RunState[]> {
     if (!entry.isFile() || !entry.name.endsWith(".json")) {
       continue;
     }
-    const state = await loadRunState(paths, path.basename(entry.name, ".json"));
-    if (state) {
-      states.push(state);
+    const specId = path.basename(entry.name, ".json");
+    const loaded = await readNormalizedRunState(path.join(paths.stateRoot, entry.name), specId);
+    if (loaded) {
+      states.push(loaded.normalized);
     }
   }
   states.sort((a, b) => a.specId.localeCompare(b.specId));

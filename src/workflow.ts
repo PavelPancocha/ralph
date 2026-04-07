@@ -569,12 +569,6 @@ async function runStructuredTurn<T>(
   const persistedThreadPolicy = state.threadPolicies[threadKey];
   const existingThreadId =
     persistedThreadId && persistedThreadPolicy === policyFingerprint ? persistedThreadId : undefined;
-  if (persistedThreadId && !existingThreadId) {
-    state.threads[threadKey] = undefined;
-    state.threadPolicies[threadKey] = undefined;
-    state.updatedAt = new Date().toISOString();
-    await saveRunState(paths, state);
-  }
   const thread = existingThreadId
     ? codex.resumeThread(existingThreadId as string, roleThreadOptions(options))
     : codex.startThread(roleThreadOptions(options));

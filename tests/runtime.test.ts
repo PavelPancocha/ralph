@@ -13,6 +13,7 @@ import {
   ensureRuntimePaths,
   ensureSpecWorktree,
   initialRunState,
+  listRunStates,
   validateImplementationCandidate,
 } from "../src/runtime.js";
 import type { ImplementationReport, RuntimePaths, SpecDocument } from "../src/types.js";
@@ -150,6 +151,40 @@ test("initialRunState starts done when a legacy done marker exists", () => {
   );
   assert.equal(state.status, "done");
   assert.equal(state.legacyDoneDetected, true);
+});
+
+test("listRunStates normalizes legacy state without rewriting the file", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-runtime-state-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const paths = buildRuntimePaths(projectRoot, workspaceRoot);
+  await ensureRuntimePaths(paths);
+
+  const legacyRaw = `${JSON.stringify(
+    {
+      specId: "1001-example",
+      specRel: "1001-example.md",
+      status: "planning",
+      currentIteration: 1,
+      runId: "legacy-run",
+      worktreePath: "/tmp/worktree",
+      updatedAt: "2026-04-07T09:00:00.000Z",
+      threads: {
+        planningSpec: "legacy-thread",
+      },
+      legacyDoneDetected: false,
+    },
+    null,
+    2,
+  )}\n`;
+  const statePath = path.join(paths.stateRoot, "1001-example.json");
+  await fs.writeFile(statePath, legacyRaw, "utf8");
+
+  const states = await listRunStates(paths);
+
+  assert.equal(states.length, 1);
+  assert.equal(states[0]?.stateVersion, 2);
+  assert.equal(states[0]?.threads.planningSpec, "legacy-thread");
+  assert.equal(await fs.readFile(statePath, "utf8"), legacyRaw);
 });
 
 test("ensureSpecWorktree reuses an existing feature branch without resetting it", async () => {
