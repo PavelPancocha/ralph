@@ -1409,6 +1409,115 @@ test("executeSpec normalizes legacy run state and starts fresh threads when poli
   assert.ok(state.threadPolicies.planningSpec);
 });
 
+test("executeSpec resumes a persisted thread when the saved policy matches", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "11223344556677889900aabbccddeeff00112233";
+  const additionalDirectories = [
+    path.join(repoRoot, ".git"),
+    path.join(repoRoot, ".git", "worktrees", spec.specId),
+  ];
+  const planningSpecPolicy = JSON.stringify({
+    role: "planning_spec",
+    model: "gpt-5.4-mini",
+    workingDirectory: path.resolve(expectedWorktreePath),
+    additionalDirectories: additionalDirectories.map((dir) => path.resolve(dir)).sort(),
+    sandboxMode: "read-only",
+    approvalPolicy: "never",
+    reasoningEffort: "medium",
+  });
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "planning",
+      currentIteration: 0,
+      runId: "saved-run",
+      worktreePath: expectedWorktreePath,
+      updatedAt: "2026-04-07T09:00:00.000Z",
+      threads: {
+        planningSpec: "saved-planning-spec",
+      },
+      threadPolicies: {
+        planningSpec: planningSpecPolicy,
+      },
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Single pass.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed one attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.equal(fakeCodex.threadConfigs[0]?.method, "resume");
+  assert.equal(fakeCodex.threadConfigs[0]?.threadId, "saved-planning-spec");
+});
+
 test("executeSpec starts a fresh thread when persisted thread policy metadata mismatches", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
