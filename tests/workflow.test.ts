@@ -1500,7 +1500,7 @@ test("executeSpec starts a fresh thread when persisted thread policy metadata mi
   assert.equal(fakeCodex.threadConfigs[0]?.threadId, "thread-0");
 });
 
-test("executeSpec persists invalidation-cleared state before continuing", async () => {
+test("executeSpec keeps invalidation reason persisted after replanning resumes", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
@@ -1563,6 +1563,13 @@ test("executeSpec persists invalidation-cleared state before continuing", async 
       rejectedFindings: [],
       fixInstructions: ["Re-plan around the right files."],
     }),
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
   ]);
 
   await assert.rejects(
@@ -1572,27 +1579,21 @@ test("executeSpec persists invalidation-cleared state before continuing", async 
       spec,
       fakeWorkflowDeps(fakeCodex, {
         onProgress: (event) => {
-          if (event.summary === `plan invalidated: ${invalidationReason}`) {
-            throw new Error("interrupt after invalidation");
+          if (event.iteration === 2 && event.summary === "building understanding packet") {
+            throw new Error("interrupt during replanned understanding");
           }
         },
       }),
     ),
-    /interrupt after invalidation/,
+    /interrupt during replanned understanding/,
   );
 
   const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
   assert.equal(state.invalidationReason, invalidationReason);
-  assert.equal(state.threads.planningSpec, undefined);
-  assert.equal(state.threads.planningRepo, undefined);
-  assert.equal(state.threads.planningRisks, undefined);
-  assert.equal(state.threads.supervisor, undefined);
-  assert.equal(state.threads.understander, undefined);
-  assert.equal(state.threads.implementer, undefined);
-  assert.equal(state.threads.reviewerCorrectness, undefined);
-  assert.equal(state.threads.reviewerTests, undefined);
-  assert.equal(state.threads.reviewLead, undefined);
-  assert.equal(state.threads.recheck, undefined);
+  assert.ok(state.threads.planningSpec);
+  assert.ok(state.threads.planningRepo);
+  assert.ok(state.threads.planningRisks);
+  assert.ok(state.threads.supervisor);
 });
 
 test("executeSpec sends recheck the real reviewer reports plus the review lead summary", async () => {

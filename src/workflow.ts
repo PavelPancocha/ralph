@@ -771,11 +771,6 @@ export async function executeSpec(
       buildSupervisorPrompt(spec, worktreePath, planningViews, invalidationReason),
     );
     plannedReviewerRoles = mergeReviewerRoles(defaultReviewerRoles, supervisorStrategy.output.reviewerRoles);
-    if (state.invalidationReason) {
-      state.invalidationReason = undefined;
-      state.updatedAt = new Date().toISOString();
-      await saveRunState(paths, state);
-    }
     shouldReplan = false;
   };
 
@@ -807,9 +802,6 @@ export async function executeSpec(
       understandingPacketOutputSchema,
       buildUnderstanderPrompt(spec, worktreePath, supervisorStrategy.output, planningViews, currentInvalidationReason),
     );
-    if (currentInvalidationReason !== undefined && state.invalidationReason === undefined) {
-      invalidationReason = undefined;
-    }
     understandingPacket = understanding.output;
     await writeHumanArtifact(
       paths,
