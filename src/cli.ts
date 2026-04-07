@@ -13,7 +13,7 @@ export interface ParsedArgs {
   command: "run" | "status" | "inspect" | "create-spec";
   specFilters: string[];
   workspaceRoot: string | undefined;
-  model: string;
+  model: string | undefined;
   maxIterations: number;
   dryRun: boolean;
   inspectTarget: string | undefined;
@@ -63,7 +63,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const args: ParsedArgs = {
     command,
     specFilters: [],
-    model: "gpt-5.3-codex",
+    model: undefined,
     maxIterations: 3,
     dryRun: false,
     workspaceRoot: undefined,
@@ -186,7 +186,11 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
   const executeSpecFn = deps.executeSpec ?? executeSpec;
 
   let failures = 0;
-  console.log(`Running ${selected.length} spec(s) with model=${parsed.model} maxIterations=${parsed.maxIterations}`);
+  console.log(
+    parsed.model
+      ? `Running ${selected.length} spec(s) with model override=${parsed.model} maxIterations=${parsed.maxIterations}`
+      : `Running ${selected.length} spec(s) with smart role policy maxIterations=${parsed.maxIterations}`,
+  );
   for (const [index, relSpec] of selected.entries()) {
     const spec = await parseSpecFile(projectRoot, workspaceRoot, relSpec);
     const specIndex = index + 1;

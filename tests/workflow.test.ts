@@ -171,14 +171,106 @@ git status --short
   return { projectRoot, workspaceRoot, repoRoot, paths };
 }
 
+function planningViewResponse(
+  lens: "spec" | "repo" | "risks",
+  summary: string,
+  overrides: Partial<{
+    keyPoints: string[];
+    suggestedFiles: string[];
+    suggestedReviewers: Array<"correctness" | "tests" | "security" | "performance">;
+    verificationHints: string[];
+  }> = {},
+): string {
+  return JSON.stringify({
+    lens,
+    summary,
+    keyPoints: overrides.keyPoints ?? [],
+    suggestedFiles: overrides.suggestedFiles ?? [],
+    suggestedReviewers: overrides.suggestedReviewers ?? [],
+    verificationHints: overrides.verificationHints ?? [],
+  });
+}
+
+function defaultPlanningResponses(repoRoot: string, worktreePath: string): string[] {
+  return [
+    planningViewResponse("spec", "Spec view is aligned.", {
+      keyPoints: ["Keep the change scoped to the spec contract."],
+    }),
+    planningViewResponse("repo", "Repo view identifies the likely files.", {
+      suggestedFiles: [path.join(repoRoot, "README.md"), path.join(worktreePath, "README.md")],
+    }),
+    planningViewResponse("risks", "Risk view confirms correctness/tests coverage.", {
+      suggestedReviewers: ["correctness", "tests"],
+      verificationHints: ["Prefer git status --short first."],
+    }),
+  ];
+}
+
+function reviewLeadReadyResponse(reviews: Array<{
+  reviewer: "correctness" | "tests" | "security" | "performance";
+  status: "approved" | "changes_requested";
+  summary: string;
+  findings: Array<{
+    severity: "info" | "warning" | "error";
+    category: "correctness" | "tests" | "security" | "performance";
+    title: string;
+    detail: string;
+    action: string;
+  }>;
+}>, summary = "Review synthesis is ready for recheck."): string {
+  return JSON.stringify({
+    status: "ready_for_recheck",
+    summary,
+    reviews,
+    followUpReviewers: [],
+  });
+}
+
+function reviewLeadFollowUpResponse(
+  followUpReviewers: Array<"correctness" | "tests" | "security" | "performance">,
+  reviews: Array<{
+    reviewer: "correctness" | "tests" | "security" | "performance";
+    status: "approved" | "changes_requested";
+    summary: string;
+    findings: Array<{
+      severity: "info" | "warning" | "error";
+      category: "correctness" | "tests" | "security" | "performance";
+      title: string;
+      detail: string;
+      action: string;
+    }>;
+  }>,
+  summary = "Need targeted follow-up review.",
+): string {
+  return JSON.stringify({
+    status: "needs_targeted_follow_up",
+    summary,
+    reviews,
+    followUpReviewers,
+  });
+}
+
 test("executeSpec completes the supervised loop with an injected Codex backend", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const commitHash = "1234567890abcdef1234567890abcdef12345678";
   const progressEvents: WorkflowProgressEvent[] = [];
+  const correctnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const testsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "Verification coverage is sufficient.",
+    findings: [],
+  };
 
   const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
     JSON.stringify({
       summary: "Use standard correctness and tests reviewers.",
       reviewerRoles: [],
@@ -205,18 +297,9 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
       verificationSummary: "Verified locally.",
       concerns: [],
     }),
-    JSON.stringify({
-      reviewer: "correctness",
-      status: "approved",
-      summary: "No correctness issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "tests",
-      status: "approved",
-      summary: "Verification coverage is sufficient.",
-      findings: [],
-    }),
+    JSON.stringify(correctnessReview),
+    JSON.stringify(testsReview),
+    reviewLeadReadyResponse([correctnessReview, testsReview]),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -235,7 +318,7 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   const options: RalphRunOptions = {
     workspaceRoot,
     projectRoot,
-    model: "gpt-5.3-codex",
+    model: undefined,
     maxIterations: 2,
     dryRun: false,
     specFilters: [],
@@ -254,10 +337,26 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
 
   assert.equal(outcome.status, "done");
   assert.equal(outcome.candidateCommit, commitHash);
-  const implementerThread = fakeCodex.threadConfigs[2];
+  const implementerThread = fakeCodex.threadConfigs[5];
   assert.deepEqual(
     implementerThread?.options?.additionalDirectories?.sort(),
     [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)].sort(),
+  );
+  assert.deepEqual(
+    fakeCodex.threadConfigs.map((entry) => [entry.method, entry.options?.model, entry.options?.modelReasoningEffort]),
+    [
+      ["start", "gpt-5.4-mini", "medium"],
+      ["start", "gpt-5.4-mini", "medium"],
+      ["start", "gpt-5.4-mini", "high"],
+      ["start", "gpt-5.4", "xhigh"],
+      ["start", "gpt-5.4", "xhigh"],
+      ["start", "gpt-5.4-mini", "high"],
+      ["start", "gpt-5.4-mini", "high"],
+      ["start", "gpt-5.4-mini", "high"],
+      ["start", "gpt-5.4", "xhigh"],
+      ["start", "gpt-5.4", "xhigh"],
+      ["resume", "gpt-5.4", "xhigh"],
+    ],
   );
 
   const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
@@ -267,12 +366,16 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
     progressEvents.map((event) => [event.phase, event.summary]),
     [
       ["setup", `worktree ready at ${expectedWorktreePath}`],
+      ["planning", "running planning_spec helper"],
+      ["planning", "running planning_repo helper"],
+      ["planning", "running planning_risks helper"],
       ["planning", "running supervisor strategy"],
       ["planning", "building understanding packet"],
       ["implementing", "running implementer"],
       ["implementing", "candidate commit validated"],
       ["reviewing", "running correctness reviewer"],
       ["reviewing", "running tests reviewer"],
+      ["reviewing", "running review lead"],
       ["rechecking", "running recheck verdict"],
       ["rechecking", "running supervisor final decision"],
       ["done", "Spec completed successfully."],
@@ -280,7 +383,9 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   );
   const eventLog = await fs.readFile(runEventLogPath(paths, spec.specId, progressEvents[0]?.runId ?? ""), "utf8");
   assert.match(eventLog, /phase=setup .*worktree ready/);
+  assert.match(eventLog, /phase=planning iteration=1 running planning_spec helper/);
   assert.match(eventLog, /phase=reviewing iteration=1 reviewer=correctness running correctness reviewer/);
+  assert.match(eventLog, /phase=reviewing iteration=1 running review lead/);
   assert.match(eventLog, new RegExp(`phase=done iteration=1 commit=${commitHash} Spec completed successfully\\.`));
 
   const doneReport = await fs.readFile(path.join(paths.reportsRoot, "done", `${spec.specId}.md`), "utf8");
@@ -293,8 +398,27 @@ test("executeSpec always includes correctness and tests reviewers when the super
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const commitHash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+  const correctnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const testsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "No test issues.",
+    findings: [],
+  };
+  const securityReview = {
+    reviewer: "security" as const,
+    status: "approved" as const,
+    summary: "No security issues.",
+    findings: [],
+  };
 
   const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
     JSON.stringify({
       summary: "Security needs extra attention.",
       reviewerRoles: ["security"],
@@ -321,24 +445,10 @@ test("executeSpec always includes correctness and tests reviewers when the super
       verificationSummary: "Verified locally.",
       concerns: [],
     }),
-    JSON.stringify({
-      reviewer: "correctness",
-      status: "approved",
-      summary: "No correctness issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "tests",
-      status: "approved",
-      summary: "No test issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "security",
-      status: "approved",
-      summary: "No security issues.",
-      findings: [],
-    }),
+    JSON.stringify(correctnessReview),
+    JSON.stringify(testsReview),
+    JSON.stringify(securityReview),
+    reviewLeadReadyResponse([correctnessReview, testsReview, securityReview]),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -372,6 +482,133 @@ test("executeSpec always includes correctness and tests reviewers when the super
   assert.ok(state.threads.reviewerTests);
   assert.ok(state.threads.reviewerSecurity);
   assert.equal(state.threads.reviewerPerformance, undefined);
+  assert.ok(state.threads.reviewLead);
+});
+
+test("executeSpec reruns only targeted reviewers at stronger policy when the review lead asks for follow-up", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const correctnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const testsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "No test issues.",
+    findings: [],
+  };
+  const firstSecurityReview = {
+    reviewer: "security" as const,
+    status: "changes_requested" as const,
+    summary: "Need a deeper security read.",
+    findings: [
+      {
+        severity: "warning" as const,
+        category: "security" as const,
+        title: "Need more depth",
+        detail: "The initial review is inconclusive.",
+        action: "Inspect the risky path in more detail.",
+      },
+    ],
+  };
+  const finalSecurityReview = {
+    reviewer: "security" as const,
+    status: "approved" as const,
+    summary: "Escalated security review is satisfied.",
+    findings: [],
+  };
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Security needs extra attention.",
+      reviewerRoles: ["security"],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Edit README and verify with git status.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Implemented change and committed it.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify(correctnessReview),
+    JSON.stringify(testsReview),
+    JSON.stringify(firstSecurityReview),
+    reviewLeadFollowUpResponse(["security"], [correctnessReview, testsReview, firstSecurityReview]),
+    JSON.stringify(finalSecurityReview),
+    reviewLeadReadyResponse([correctnessReview, testsReview, finalSecurityReview], "Follow-up complete."),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: false,
+      specFilters: [],
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.equal(
+    fakeCodex.prompts.filter((item) => item.prompt.includes("You are Ralph's security reviewer.")).length,
+    2,
+  );
+  assert.equal(
+    fakeCodex.prompts.filter((item) => item.prompt.includes("You are Ralph's review lead.")).length,
+    2,
+  );
+  const securityConfigs = fakeCodex.threadConfigs.filter((entry) =>
+    entry.options?.workingDirectory === expectedWorktreePath
+      && (entry.options?.sandboxMode === "read-only")
+      && (entry.options?.modelReasoningEffort === "high" || entry.options?.modelReasoningEffort === "xhigh")
+      && entry.options?.model?.includes("gpt-5.4")
+      && fakeCodex.prompts.some((prompt) => prompt.threadId === entry.threadId && prompt.prompt.includes("security reviewer")),
+  );
+  assert.deepEqual(
+    securityConfigs.map((entry) => [entry.method, entry.options?.model, entry.options?.modelReasoningEffort]),
+    [
+      ["start", "gpt-5.4-mini", "high"],
+      ["start", "gpt-5.4", "xhigh"],
+    ],
+  );
 });
 
 test("executeSpec carries accepted findings into the next implementer turn on needs_fix", async () => {
@@ -380,8 +617,41 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const commitHash = "9999999999999999999999999999999999999999";
   const fixAction = "Add the missing verification coverage.";
+  const firstCorrectnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const firstTestsReview = {
+    reviewer: "tests" as const,
+    status: "changes_requested" as const,
+    summary: "More verification is needed.",
+    findings: [
+      {
+        severity: "warning" as const,
+        category: "tests" as const,
+        title: "More verification",
+        detail: "The first pass did not cover the requested verification.",
+        action: fixAction,
+      },
+    ],
+  };
+  const secondCorrectnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const secondTestsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "Verification is now sufficient.",
+    findings: [],
+  };
 
   const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
     JSON.stringify({
       summary: "Use standard correctness and tests reviewers.",
       reviewerRoles: [],
@@ -408,26 +678,9 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
       verificationSummary: "Verified locally.",
       concerns: [],
     }),
-    JSON.stringify({
-      reviewer: "correctness",
-      status: "approved",
-      summary: "No correctness issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "tests",
-      status: "changes_requested",
-      summary: "More verification is needed.",
-      findings: [
-        {
-          severity: "warning",
-          category: "tests",
-          title: "More verification",
-          detail: "The first pass did not cover the requested verification.",
-          action: fixAction,
-        },
-      ],
-    }),
+    JSON.stringify(firstCorrectnessReview),
+    JSON.stringify(firstTestsReview),
+    reviewLeadReadyResponse([firstCorrectnessReview, firstTestsReview]),
     JSON.stringify({
       verdict: "needs_fix",
       summary: "Address the accepted reviewer findings.",
@@ -463,18 +716,9 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
       verificationSummary: "Verified locally again.",
       concerns: [],
     }),
-    JSON.stringify({
-      reviewer: "correctness",
-      status: "approved",
-      summary: "No correctness issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "tests",
-      status: "approved",
-      summary: "Verification is now sufficient.",
-      findings: [],
-    }),
+    JSON.stringify(secondCorrectnessReview),
+    JSON.stringify(secondTestsReview),
+    reviewLeadReadyResponse([secondCorrectnessReview, secondTestsReview]),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -504,15 +748,27 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
   assert.equal(outcome.status, "done");
 
   const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
-  assert.equal(state.threads.understander, "thread-1");
-  assert.equal(state.threads.implementer, "thread-2");
-  assert.equal(state.threads.reviewerCorrectness, "thread-3");
-  assert.equal(state.threads.reviewerTests, "thread-4");
-  assert.equal(state.threads.recheck, "thread-5");
+  assert.equal(state.threads.understander, "thread-4");
+  assert.equal(state.threads.implementer, "thread-10");
+  assert.equal(state.threads.reviewerCorrectness, "thread-6");
+  assert.equal(state.threads.reviewerTests, "thread-7");
+  assert.equal(state.threads.reviewLead, "thread-8");
+  assert.equal(state.threads.recheck, "thread-9");
 
   const implementerPrompts = fakeCodex.prompts.filter((item) => item.prompt.includes("You are the implementer agent for Ralph."));
   assert.equal(implementerPrompts.length, 2);
   assert.ok(implementerPrompts[1]?.prompt.includes(fixAction));
+  assert.deepEqual(
+    fakeCodex.threadConfigs
+      .filter((entry) => entry.options?.workingDirectory === expectedWorktreePath)
+      .filter((entry) => entry.options?.modelReasoningEffort === "high" || entry.options?.modelReasoningEffort === "xhigh")
+      .filter((entry) => entry.options?.sandboxMode === "workspace-write")
+      .map((entry) => [entry.method, entry.options?.model, entry.options?.modelReasoningEffort]),
+    [
+      ["start", "gpt-5.3-codex", "high"],
+      ["start", "gpt-5.3-codex", "xhigh"],
+    ],
+  );
 });
 
 test("executeSpec clears reviewer state when recheck invalidates the plan", async () => {
@@ -522,8 +778,41 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
   const commitHash = "fedcbafedcbafedcbafedcbafedcbafedcbafedc";
   const staleAction = "Remove the stale migration plan.";
   const invalidationReason = "The first plan targeted the wrong files.";
+  const firstCorrectnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const firstTestsReview = {
+    reviewer: "tests" as const,
+    status: "changes_requested" as const,
+    summary: "The plan was wrong.",
+    findings: [
+      {
+        severity: "error" as const,
+        category: "tests" as const,
+        title: "Wrong target",
+        detail: "The first plan changed the wrong area.",
+        action: staleAction,
+      },
+    ],
+  };
+  const secondCorrectnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const secondTestsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "No test issues.",
+    findings: [],
+  };
 
   const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
     JSON.stringify({
       summary: "Use standard correctness and tests reviewers.",
       reviewerRoles: [],
@@ -550,26 +839,9 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
       verificationSummary: "Verified locally.",
       concerns: [],
     }),
-    JSON.stringify({
-      reviewer: "correctness",
-      status: "approved",
-      summary: "No correctness issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "tests",
-      status: "changes_requested",
-      summary: "The plan was wrong.",
-      findings: [
-        {
-          severity: "error",
-          category: "tests",
-          title: "Wrong target",
-          detail: "The first plan changed the wrong area.",
-          action: staleAction,
-        },
-      ],
-    }),
+    JSON.stringify(firstCorrectnessReview),
+    JSON.stringify(firstTestsReview),
+    reviewLeadReadyResponse([firstCorrectnessReview, firstTestsReview]),
     JSON.stringify({
       verdict: "invalidate_plan",
       summary: invalidationReason,
@@ -584,6 +856,13 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
       ],
       rejectedFindings: [],
       fixInstructions: ["Re-plan around the right files."],
+    }),
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
     }),
     JSON.stringify({
       summary: "Second plan targets the correct file.",
@@ -605,18 +884,9 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
       verificationSummary: "Verified locally.",
       concerns: [],
     }),
-    JSON.stringify({
-      reviewer: "correctness",
-      status: "approved",
-      summary: "No correctness issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "tests",
-      status: "approved",
-      summary: "No test issues.",
-      findings: [],
-    }),
+    JSON.stringify(secondCorrectnessReview),
+    JSON.stringify(secondTestsReview),
+    reviewLeadReadyResponse([secondCorrectnessReview, secondTestsReview]),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",
@@ -647,9 +917,13 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
 
   const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
   assert.equal(state.currentIteration, 2);
-  assert.notEqual(state.threads.understander, "thread-1");
-  assert.notEqual(state.threads.implementer, "thread-2");
-  assert.notEqual(state.threads.recheck, "thread-5");
+  assert.notEqual(state.threads.planningSpec, "thread-0");
+  assert.notEqual(state.threads.planningRepo, "thread-1");
+  assert.notEqual(state.threads.planningRisks, "thread-2");
+  assert.notEqual(state.threads.understander, "thread-4");
+  assert.notEqual(state.threads.implementer, "thread-5");
+  assert.notEqual(state.threads.reviewLead, "thread-8");
+  assert.notEqual(state.threads.recheck, "thread-9");
 
   const understanderPrompts = fakeCodex.prompts.filter((item) => item.prompt.includes("You are the understander agent for Ralph."));
   assert.equal(understanderPrompts.length, 2);
@@ -720,8 +994,29 @@ test("executeSpec fails after maxIterations is exhausted on needs_fix without ca
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const commitHash = "8888888888888888888888888888888888888888";
+  const correctnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const testsReview = {
+    reviewer: "tests" as const,
+    status: "changes_requested" as const,
+    summary: "The run still needs fixes.",
+    findings: [
+      {
+        severity: "warning" as const,
+        category: "tests" as const,
+        title: "More verification",
+        detail: "One iteration was not enough.",
+        action: "Add more verification.",
+      },
+    ],
+  };
 
   const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
     JSON.stringify({
       summary: "Use standard correctness and tests reviewers.",
       reviewerRoles: [],
@@ -748,26 +1043,9 @@ test("executeSpec fails after maxIterations is exhausted on needs_fix without ca
       verificationSummary: "Verified locally.",
       concerns: [],
     }),
-    JSON.stringify({
-      reviewer: "correctness",
-      status: "approved",
-      summary: "No correctness issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "tests",
-      status: "changes_requested",
-      summary: "The run still needs fixes.",
-      findings: [
-        {
-          severity: "warning",
-          category: "tests",
-          title: "More verification",
-          detail: "One iteration was not enough.",
-          action: "Add more verification.",
-        },
-      ],
-    }),
+    JSON.stringify(correctnessReview),
+    JSON.stringify(testsReview),
+    reviewLeadReadyResponse([correctnessReview, testsReview]),
     JSON.stringify({
       verdict: "needs_fix",
       summary: "The implementation still needs work.",
@@ -818,6 +1096,7 @@ test("executeSpec throws when a reviewer reports the wrong reviewer identity", a
   const commitHash = "7777777777777777777777777777777777777777";
 
   const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
     JSON.stringify({
       summary: "Use standard correctness and tests reviewers.",
       reviewerRoles: [],
@@ -875,9 +1154,22 @@ test("executeSpec warns and drops resume state when the SDK returns a null threa
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const commitHash = "6666666666666666666666666666666666666666";
+  const correctnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const testsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "Verification coverage is sufficient.",
+    findings: [],
+  };
 
   const fakeCodex = new FakeCodex(
     [
+      ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
       JSON.stringify({
         summary: "Use standard correctness and tests reviewers.",
         reviewerRoles: [],
@@ -904,18 +1196,9 @@ test("executeSpec warns and drops resume state when the SDK returns a null threa
         verificationSummary: "Verified locally.",
         concerns: [],
       }),
-      JSON.stringify({
-        reviewer: "correctness",
-        status: "approved",
-        summary: "No correctness issues.",
-        findings: [],
-      }),
-      JSON.stringify({
-        reviewer: "tests",
-        status: "approved",
-        summary: "Verification coverage is sufficient.",
-        findings: [],
-      }),
+      JSON.stringify(correctnessReview),
+      JSON.stringify(testsReview),
+      reviewLeadReadyResponse([correctnessReview, testsReview]),
       JSON.stringify({
         verdict: "approve",
         summary: "Implementation matches the spec.",
@@ -930,7 +1213,7 @@ test("executeSpec warns and drops resume state when the SDK returns a null threa
         nextAction: "none",
       }),
     ],
-    [null],
+    ["planning-spec-thread", "planning-repo-thread", "planning-risks-thread", null],
   );
 
   let warningOutput = "";
@@ -958,12 +1241,12 @@ test("executeSpec warns and drops resume state when the SDK returns a null threa
   }
 
   const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
-  assert.equal(state.threads.supervisor, "thread-5");
+  assert.equal(state.threads.supervisor, "thread-6");
   assert.match(warningOutput, /Thread id missing for role=supervisor/);
 
   const supervisorPrompts = fakeCodex.prompts.filter((item) => item.prompt.includes("You are Ralph's supervisor agent"));
   assert.equal(supervisorPrompts[0]?.threadId, null);
-  assert.equal(supervisorPrompts[1]?.threadId, "thread-5");
+  assert.equal(supervisorPrompts[1]?.threadId, "thread-6");
 });
 
 test("executeSpec fails when the final supervisor outcome is not done", async () => {
@@ -971,8 +1254,21 @@ test("executeSpec fails when the final supervisor outcome is not done", async ()
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const commitHash = "0123456789abcdef0123456789abcdef01234567";
+  const correctnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const testsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "Verification coverage is sufficient.",
+    findings: [],
+  };
 
   const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
     JSON.stringify({
       summary: "Use standard correctness and tests reviewers.",
       reviewerRoles: [],
@@ -999,18 +1295,9 @@ test("executeSpec fails when the final supervisor outcome is not done", async ()
       verificationSummary: "Verified locally.",
       concerns: [],
     }),
-    JSON.stringify({
-      reviewer: "correctness",
-      status: "approved",
-      summary: "No correctness issues.",
-      findings: [],
-    }),
-    JSON.stringify({
-      reviewer: "tests",
-      status: "approved",
-      summary: "Verification coverage is sufficient.",
-      findings: [],
-    }),
+    JSON.stringify(correctnessReview),
+    JSON.stringify(testsReview),
+    reviewLeadReadyResponse([correctnessReview, testsReview]),
     JSON.stringify({
       verdict: "approve",
       summary: "Implementation matches the spec.",

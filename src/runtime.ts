@@ -374,6 +374,9 @@ export function initialRunState(spec: SpecDocument, legacyDoneDetected: boolean)
     lastError: undefined,
     updatedAt: new Date().toISOString(),
     threads: {
+      planningSpec: undefined,
+      planningRepo: undefined,
+      planningRisks: undefined,
       supervisor: undefined,
       understander: undefined,
       implementer: undefined,
@@ -381,6 +384,7 @@ export function initialRunState(spec: SpecDocument, legacyDoneDetected: boolean)
       reviewerTests: undefined,
       reviewerSecurity: undefined,
       reviewerPerformance: undefined,
+      reviewLead: undefined,
       recheck: undefined,
     },
     legacyDoneDetected,

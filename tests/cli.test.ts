@@ -91,6 +91,12 @@ test("parseArgs accepts spec-like shorthand filters and flag-only run invocation
   assert.equal(flagOnly.parseError, undefined);
   assert.equal(flagOnly.command, "run");
   assert.equal(flagOnly.dryRun, true);
+  assert.equal(flagOnly.model, undefined);
+});
+
+test("parseArgs leaves model unset when --model is omitted so smart role policy can decide", () => {
+  const parsed = parseArgs(["run", "1001-demo"]);
+  assert.equal(parsed.model, undefined);
 });
 
 test("create-spec scaffolds a spec with required and recommended sections", async () => {
@@ -194,7 +200,7 @@ test("runCommand streams spec-indexed progress lines and log paths during run", 
     console.log = originalLog;
   }
 
-  assert.match(logOutput, /Running 2 spec\(s\) with model=gpt-5\.3-codex maxIterations=3/);
+  assert.match(logOutput, /Running 2 spec\(s\) with model override=gpt-5\.3-codex maxIterations=3/);
   assert.match(logOutput, /\[1\/2\] 1001-one :: 1001 - One/);
   assert.match(logOutput, /\[1\/2\] logs\s+\.ralph\/runs\/1001-one\/1001-one-run\/events\.log/);
   assert.match(logOutput, /\[1\/2\] setup\s+worktree ready at \/tmp\/1001-one/);

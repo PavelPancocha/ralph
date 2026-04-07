@@ -8,12 +8,14 @@ This repository is the v2 rewrite. The old Python runner still exists in the tre
 
 For each spec, Ralph runs a fixed role pipeline:
 
-1. `supervisor` chooses any additional review coverage beyond the default pass.
-2. `understander` reads the spec and repo, then produces an execution packet.
-3. `implementer` makes the change in an isolated worktree and commits it.
-4. `reviewers` always run correctness and tests, with optional security and performance review when the supervisor asks for it.
-5. `recheck` decides whether the implementation is approved, needs another fix loop, or invalidates the plan.
-6. `supervisor` closes the run and writes the final result.
+1. `planning_spec`, `planning_repo`, and `planning_risks` build separate read-only views of the spec, repository, and likely failure surface.
+2. `supervisor` synthesizes those views into a strategy and optional extra review coverage.
+3. `understander` turns that strategy into the concrete execution packet.
+4. `implementer` makes the change in an isolated worktree and commits it.
+5. Topic reviewers always run `correctness` and `tests`, with optional `security` and `performance` when the supervisor asks for them.
+6. `review_lead` synthesizes the review set and can request one targeted stronger re-review when a topic is still ambiguous or high risk.
+7. `recheck` decides whether the implementation is approved, needs another fix loop, or invalidates the plan.
+8. `supervisor` closes the run and writes the final result.
 
 The runner is file-first and local-first:
 
@@ -50,8 +52,8 @@ node dist/src/cli.js run --dry-run
 # Override workspace root
 node dist/src/cli.js run --workspace-root /path/to/workspace
 
-# Override model
-node dist/src/cli.js run --model gpt-5.3-codex
+# Override all Ralph-managed roles to one model
+node dist/src/cli.js run --model gpt-5.4
 
 # Limit internal review/fix iterations
 node dist/src/cli.js run --max-iterations 3
@@ -76,6 +78,12 @@ node --import tsx ./src/cli.ts run
 ```
 
 `run` streams per-spec progress to the terminal with `[current/total]` prefixes, phase changes, and a per-run log path under `.ralph/runs/<spec-id>/<run-id>/events.log`.
+
+Without `--model`, Ralph uses a smart role policy by default:
+
+- `gpt-5.4-mini` for planning helpers, first-pass implementation, and first-pass topic reviews
+- `gpt-5.4` with `xhigh` reasoning for supervisor, understander, review lead, recheck, and final closeout
+- implementation and targeted review escalation move from the cheaper first pass to the stronger policy only after rejection or invalidation
 
 ## Requirements
 
@@ -218,9 +226,12 @@ These hooks are intended to keep the workflow constrained and auditable inside t
 
 Ralph development now follows TDD for the v2 codepath. The current automated suite covers:
 
+- CLI parsing and progress output
 - spec discovery and parsing
 - runtime path/state behavior
 - injected-backend workflow execution for the supervised loop
+- role-aware model selection and escalation behavior
+- targeted review-lead follow-up behavior
 
 Run locally:
 

@@ -8,6 +8,9 @@ export type CodexConfigValue =
   | { [key: string]: CodexConfigValue };
 
 export type RoleName =
+  | "planning_spec"
+  | "planning_repo"
+  | "planning_risks"
   | "supervisor"
   | "understander"
   | "implementer"
@@ -15,6 +18,7 @@ export type RoleName =
   | "reviewer_tests"
   | "reviewer_security"
   | "reviewer_performance"
+  | "review_lead"
   | "recheck";
 
 export interface BranchInstructions {
@@ -59,6 +63,9 @@ export interface RuntimePaths {
 }
 
 export interface AgentThreadRefs {
+  planningSpec: string | undefined;
+  planningRepo: string | undefined;
+  planningRisks: string | undefined;
   supervisor: string | undefined;
   understander: string | undefined;
   implementer: string | undefined;
@@ -66,6 +73,7 @@ export interface AgentThreadRefs {
   reviewerTests: string | undefined;
   reviewerSecurity: string | undefined;
   reviewerPerformance: string | undefined;
+  reviewLead: string | undefined;
   recheck: string | undefined;
 }
 
@@ -112,6 +120,8 @@ export interface WorkflowProgressEvent {
   candidateCommit?: string;
 }
 
+export type PlanningLens = "spec" | "repo" | "risks";
+
 export interface AgentRunArtifact<TPayload> {
   role: RoleName;
   turnId: string;
@@ -131,6 +141,15 @@ export interface SupervisorStrategy {
   reviewerRoles: Array<"correctness" | "tests" | "security" | "performance">;
   keyRisks: string[];
   notesForUnderstander: string[];
+}
+
+export interface PlanningView {
+  lens: PlanningLens;
+  summary: string;
+  keyPoints: string[];
+  suggestedFiles: string[];
+  suggestedReviewers: Array<"correctness" | "tests" | "security" | "performance">;
+  verificationHints: string[];
 }
 
 export interface UnderstandingPacket {
@@ -170,6 +189,13 @@ export interface ReviewerReport {
   findings: ReviewFinding[];
 }
 
+export interface ReviewLeadReport {
+  status: "ready_for_recheck" | "needs_targeted_follow_up";
+  summary: string;
+  reviews: ReviewerReport[];
+  followUpReviewers: Array<"correctness" | "tests" | "security" | "performance">;
+}
+
 export interface RecheckVerdict {
   verdict: "approve" | "needs_fix" | "invalidate_plan";
   summary: string;
@@ -188,7 +214,7 @@ export interface SupervisorOutcome {
 export interface RalphRunOptions {
   workspaceRoot: string;
   projectRoot: string;
-  model: string;
+  model: string | undefined;
   maxIterations: number;
   dryRun: boolean;
   specFilters: string[];
@@ -199,6 +225,7 @@ export interface RoleExecutionOptions {
   model: string;
   workingDirectory: string;
   additionalDirectories?: string[];
+  forceFreshThread?: boolean;
   sandboxMode: SandboxMode;
   approvalPolicy: ApprovalMode;
   reasoningEffort: ModelReasoningEffort;

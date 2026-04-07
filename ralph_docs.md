@@ -21,25 +21,48 @@ The design goal is to preserve the old Ralph feel, meaning a file-first backlog 
 
 For a runnable spec, Ralph executes this sequence:
 
-1. `supervisor`
-   Chooses any additional review coverage beyond the default correctness/tests pass.
-2. `understander`
-   Reads the spec and repository, then emits an `UnderstandingPacket`.
-3. `implementer`
+1. `planning_spec`, `planning_repo`, `planning_risks`
+   Build separate read-only planning views over the spec, repository, and failure surface.
+2. `supervisor`
+   Synthesizes those planning views and chooses any extra review coverage beyond the default correctness/tests pass.
+3. `understander`
+   Reads the spec, repository, planning views, and supervisor strategy, then emits an `UnderstandingPacket`.
+4. `implementer`
    Applies the change in the active worktree and emits an `ImplementationReport`.
-4. `reviewers`
+5. `reviewers`
    Review the candidate implementation. `correctness` and `tests` always run; `security` and `performance` are added when the supervisor requests them.
-5. `recheck`
-   Accepts or rejects reviewer findings and returns one of:
+6. `review_lead`
+   Synthesizes reviewer outputs and may request one targeted stronger re-review for a disputed topic before handing the review set to recheck.
+7. `recheck`
+   Accepts or rejects the synthesized review findings and returns one of:
    - `approve`
    - `needs_fix`
    - `invalidate_plan`
-6. `supervisor`
+8. `supervisor`
    Produces the final `SupervisorOutcome`.
 
 If recheck returns `needs_fix`, the loop continues until `maxIterations` is reached.
 
-If recheck returns `invalidate_plan`, Ralph clears the understander/implementer/reviewer/recheck thread references and starts a fresh planning pass inside the same spec run.
+If recheck returns `invalidate_plan`, Ralph clears planning-helper, supervisor, understander, implementer, reviewer, review-lead, and recheck thread references and starts a fresh stronger planning pass inside the same spec run.
+
+## Default Model Policy
+
+Without `--model`, Ralph uses a role-aware default policy:
+
+- `gpt-5.4-mini`
+  - `planning_spec`
+  - `planning_repo`
+  - `planning_risks`
+  - first-pass `implementer`
+  - first-pass topic reviewers
+- `gpt-5.4` with `xhigh`
+  - `supervisor`
+  - `understander`
+  - `review_lead`
+  - `recheck`
+  - final `supervisor`
+
+If the first implementation or first-pass review is not accepted, Ralph escalates the next implementation attempt or targeted re-review to the stronger policy.
 
 ## Source Layout
 
@@ -92,10 +115,12 @@ Responsible for:
 
 Builds the role-specific prompt payloads for:
 
+- planning helpers
 - supervisor strategy
 - understander
 - implementer
 - reviewer
+- review lead
 - recheck
 - supervisor final outcome
 
@@ -110,7 +135,7 @@ It:
 - persists thread ids in run state
 - writes structured JSON artifacts for each turn
 - emits progress events for terminal streaming and `.ralph/runs/.../events.log`
-- loops review/recheck iterations
+- loops review/recheck iterations with role-aware model escalation
 - writes the final done report on success
 
 ## Runtime Layout
@@ -217,10 +242,12 @@ Ralph v2 does not rely on magic phrases or stdout parsing for correctness. Inste
 
 Important payloads:
 
+- `PlanningView`
 - `SupervisorStrategy`
 - `UnderstandingPacket`
 - `ImplementationReport`
 - `ReviewerReport`
+- `ReviewLeadReport`
 - `RecheckVerdict`
 - `SupervisorOutcome`
 
