@@ -799,6 +799,14 @@ async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, st
   };
 }
 
+function formatResumeCheckpointMessage(resumeCheckpoint: ResumeCheckpoint | null): string {
+  if (!resumeCheckpoint) {
+    return "[resume] no reusable checkpoint found — starting from scratch";
+  }
+  const planningNote = resumeCheckpoint.stage === "planning" ? " (planning will rerun)" : "";
+  return `[resume] checkpoint: stage=${resumeCheckpoint.stage} iteration=${resumeCheckpoint.startIteration}${planningNote}`;
+}
+
 interface DryRunOutcome {
   outcome: SupervisorOutcome;
   phase: WorkflowProgressEvent["phase"];
@@ -919,6 +927,9 @@ export async function executeSpec(
   }
 
   const resumeCheckpoint = options.resume ? await inferResumeCheckpoint(paths, spec, state) : null;
+  if (options.resume) {
+    console.log(formatResumeCheckpointMessage(resumeCheckpoint));
+  }
   const runId = createRunId();
   state.runId = runId;
   state.updatedAt = new Date().toISOString();

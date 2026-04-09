@@ -591,6 +591,11 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const savedRunId = "saved-run";
   const commitHash = "1357913579135791357913579135791357913579";
+  let logOutput = "";
+  const originalLog = console.log;
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
 
   const supervisorPolicy = JSON.stringify({
     role: "supervisor",
@@ -719,22 +724,28 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
     }),
   ]);
 
-  const outcome = await executeSpec(
-    paths,
-    {
-      workspaceRoot,
-      projectRoot,
-      model: undefined,
-      maxIterations: 2,
-      dryRun: false,
-      resume: true,
-      specFilters: [],
-    },
-    spec,
-    fakeWorkflowDeps(fakeCodex),
-  );
+  let outcome;
+  try {
+    outcome = await executeSpec(
+      paths,
+      {
+        workspaceRoot,
+        projectRoot,
+        model: undefined,
+        maxIterations: 2,
+        dryRun: false,
+        resume: true,
+        specFilters: [],
+      },
+      spec,
+      fakeWorkflowDeps(fakeCodex),
+    );
+  } finally {
+    console.log = originalLog;
+  }
 
   assert.equal(outcome.status, "done");
+  assert.match(logOutput, /\[resume\] checkpoint: stage=reviewing iteration=1/);
   assert.ok(fakeCodex.prompts.every((item) => !item.prompt.includes("planning helper")));
   assert.ok(fakeCodex.prompts.every((item) => !item.prompt.includes("You are the implementer agent for Ralph.")));
   assert.ok(fakeCodex.prompts.some((item) => item.prompt.includes("You are Ralph's review lead.")));

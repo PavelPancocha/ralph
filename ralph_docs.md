@@ -54,7 +54,7 @@ If recheck returns `invalidate_plan`, Ralph clears planning-helper, supervisor, 
 If a spec is rerun after a prior failure, Ralph reuses the stored `lastError` as the restart context so the next planning pass starts from the last known problem instead of a blank slate.
 That retry also escalates the first implementation and review pass to the stronger model tier so the rerun does not fall back to the cheap initial policy.
 
-If `--resume` is used, Ralph skips ahead to the latest feasible checkpoint it can reconstruct from the saved run state and artifacts. It prefers the furthest completed stage, then continues from there instead of replaying earlier completed work.
+If `--resume` is used, Ralph skips ahead to the latest feasible checkpoint it can reconstruct from the saved run state and artifacts. It prefers the furthest completed stage, then continues from there instead of replaying earlier completed work. The CLI prints a checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or fell back to a fresh run.
 
 ## Default Model Policy
 
