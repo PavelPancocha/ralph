@@ -81,6 +81,8 @@ Workdir: demo-repo
 - Source branch: \`dev\`
 - Create branch: \`feature/demo\`
 - PR target: \`dev\`
+- Open a **draft** PR for this spec branch.
+- Apply labels: \`Prototype\`, \`work in progress\`
 
 ## Goal
 Make a safe change.
@@ -119,6 +121,9 @@ git status --short
   assert.equal(spec.branchInstructions.sourceBranch, "dev");
   assert.equal(spec.branchInstructions.createBranch, "feature/demo");
   assert.equal(spec.branchInstructions.prTarget, "dev");
+  assert.equal(spec.branchInstructions.createPr, true);
+  assert.equal(spec.branchInstructions.draftPr, true);
+  assert.deepEqual(spec.branchInstructions.labels, ["Prototype", "work in progress"]);
   assert.ok(spec.acceptanceCriteria.some((item) => item.includes("Runner completes the loop.")));
   assert.equal(spec.verificationCommands[0], "git status --short");
 });

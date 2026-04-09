@@ -11,6 +11,7 @@ import { parseSpecFile } from "../src/specs.js";
 import { executeSpec } from "../src/workflow.js";
 import type {
   CodexThreadConfig,
+  PublicationResult,
   RalphRunOptions,
   RunState,
   RuntimePaths,
@@ -101,6 +102,12 @@ function fakeWorkflowDeps(
   overrides: {
     onProgress?: (event: WorkflowProgressEvent) => void | Promise<void>;
     runVerificationCommands?: (repoPath: string, featureBranch: string, commands: string[]) => Promise<VerificationRun>;
+    publishApprovedSpec?: (
+      repoPath: string,
+      spec: { title: string; branchInstructions: { createBranch: string; prTarget?: string; draftPr?: boolean; labels?: string[] } },
+      summary: string,
+      candidateCommit: string,
+    ) => Promise<PublicationResult>;
   } = {},
 ) {
   return {
@@ -120,6 +127,20 @@ function fakeWorkflowDeps(
       })),
       summary: `Stubbed verification for ${featureBranch}.`,
       succeeded: true,
+    }),
+    publishApprovedSpec: async (
+      _repoPath: string,
+      spec: { branchInstructions: { createBranch: string; draftPr?: boolean; labels?: string[] } },
+      _summary: string,
+      _candidateCommit: string,
+    ): Promise<PublicationResult> => ({
+      branch: spec.branchInstructions.createBranch,
+      remote: "origin",
+      prNumber: 1,
+      prUrl: "https://example.test/pr/1",
+      prCreated: true,
+      draft: spec.branchInstructions.draftPr ?? false,
+      labels: spec.branchInstructions.labels ?? [],
     }),
     ...overrides,
   };
@@ -159,6 +180,8 @@ Workdir: demo-repo
 - Source branch: \`dev\`
 - Create branch: \`feature/demo\`
 - PR target: \`dev\`
+- Open a **draft** PR for this spec branch.
+- Apply labels: \`Prototype\`, \`work in progress\`
 
 ## Goal
 Make a tiny safe change.
@@ -331,6 +354,7 @@ test("executeSpec dry-run warns when a stacked parent branch is expected from an
   });
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1002-stacked-child.md");
   const progressEvents: WorkflowProgressEvent[] = [];
+  const published: Array<{ repoPath: string; summary: string; candidateCommit: string }> = [];
 
   const outcome = await executeSpec(
     paths,
@@ -448,6 +472,7 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const commitHash = "1234567890abcdef1234567890abcdef12345678";
   const progressEvents: WorkflowProgressEvent[] = [];
+  const published: Array<{ repoPath: string; summary: string; candidateCommit: string }> = [];
   const correctnessReview = {
     reviewer: "correctness" as const,
     status: "approved" as const,
@@ -521,6 +546,18 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
     options,
     spec,
     fakeWorkflowDeps(fakeCodex, {
+      publishApprovedSpec: async (repoPath, _spec, summary, candidateCommit) => {
+        published.push({ repoPath, summary, candidateCommit });
+        return {
+          branch: _spec.branchInstructions.createBranch,
+          remote: "origin",
+          prNumber: 7,
+          prUrl: "https://example.test/pr/7",
+          prCreated: true,
+          draft: true,
+          labels: ["Prototype", "work in progress"],
+        };
+      },
       onProgress: (event) => {
         progressEvents.push(event);
       },
@@ -529,6 +566,13 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
 
   assert.equal(outcome.status, "done");
   assert.equal(outcome.candidateCommit, commitHash);
+  assert.deepEqual(published, [
+    {
+      repoPath: repoRoot,
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+    },
+  ]);
   const implementerThread = fakeCodex.threadConfigs[5];
   assert.deepEqual(
     implementerThread?.options?.additionalDirectories?.sort(),
@@ -570,6 +614,7 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
       ["reviewing", "running review lead"],
       ["rechecking", "running recheck verdict"],
       ["rechecking", "running supervisor final decision"],
+      ["publishing", "pushing branch and updating pull request"],
       ["done", "Spec completed successfully."],
     ],
   );
@@ -702,6 +747,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
   const savedRunId = "saved-run";
   const commitHash = "1357913579135791357913579135791357913579";
+  const published: string[] = [];
   let logOutput = "";
   const originalLog = console.log;
   console.log = (message?: unknown) => {
@@ -849,13 +895,27 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
         specFilters: [],
       },
       spec,
-      fakeWorkflowDeps(fakeCodex),
+      fakeWorkflowDeps(fakeCodex, {
+        publishApprovedSpec: async (_repoPath, _spec, _summary, candidateCommit) => {
+          published.push(candidateCommit);
+          return {
+            branch: _spec.branchInstructions.createBranch,
+            remote: "origin",
+            prNumber: 11,
+            prUrl: "https://example.test/pr/11",
+            prCreated: false,
+            draft: true,
+            labels: ["Prototype", "work in progress"],
+          };
+        },
+      }),
     );
   } finally {
     console.log = originalLog;
   }
 
   assert.equal(outcome.status, "done");
+  assert.deepEqual(published, [commitHash]);
   assert.match(logOutput, /\[resume\] checkpoint: stage=reviewing iteration=1/);
   assert.ok(fakeCodex.prompts.every((item) => !item.prompt.includes("planning helper")));
   assert.ok(fakeCodex.prompts.every((item) => !item.prompt.includes("You are the implementer agent for Ralph.")));

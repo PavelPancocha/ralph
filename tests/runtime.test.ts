@@ -14,6 +14,7 @@ import {
   ensureSpecWorktree,
   initialRunState,
   listRunStates,
+  publishApprovedSpec,
   validateImplementationCandidate,
 } from "../src/runtime.js";
 import type { ImplementationReport, RuntimePaths, SpecDocument } from "../src/types.js";
@@ -238,6 +239,109 @@ test("runVerificationCommands checks out the feature branch in the main repo and
 
   const { stdout: restoredBranch } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
   assert.equal(restoredBranch.trim(), "dev");
+});
+
+test("publishApprovedSpec pushes the branch and creates a draft PR with the default Prototype label", async () => {
+  const { repoRoot, spec, featureCommit } = await createRuntimeFixture();
+  const remoteRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-remote-"));
+  const remoteRepo = path.join(remoteRoot, "origin.git");
+  const fakeGhRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-gh-"));
+  const fakeGhLog = path.join(fakeGhRoot, "gh.log");
+  const fakeGhCount = path.join(fakeGhRoot, "gh-count.txt");
+  const fakeGhPath = path.join(fakeGhRoot, "gh");
+
+  await execFile("git", ["init", "--bare", remoteRepo]);
+  await execFile("git", ["remote", "add", "origin", remoteRepo], { cwd: repoRoot });
+  await fs.writeFile(
+    fakeGhPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "printf '%s\\n' \"$*\" >> \"$RALPH_FAKE_GH_LOG\"",
+      "case \"$1 $2\" in",
+      "  \"pr list\")",
+      "    count=0",
+      "    if [[ -f \"$RALPH_FAKE_GH_COUNT\" ]]; then count=$(cat \"$RALPH_FAKE_GH_COUNT\"); fi",
+      "    count=$((count + 1))",
+      "    printf '%s' \"$count\" > \"$RALPH_FAKE_GH_COUNT\"",
+      "    if [[ \"$count\" -eq 1 ]]; then",
+      "      printf '[]'",
+      "    else",
+      "      printf '[{\"number\":42,\"url\":\"https://example.test/pr/42\",\"isDraft\":true}]'",
+      "    fi",
+      "    ;;",
+      "  \"pr create\")",
+      "    printf 'created\\n'",
+      "    ;;",
+      "  \"pr edit\")",
+      "    printf 'edited\\n'",
+      "    ;;",
+      "  *)",
+      "    printf 'unexpected gh invocation: %s\\n' \"$*\" >&2",
+      "    exit 1",
+      "    ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await fs.chmod(fakeGhPath, 0o755);
+
+  const originalPath = process.env.PATH;
+  const originalGhLog = process.env.RALPH_FAKE_GH_LOG;
+  const originalGhCount = process.env.RALPH_FAKE_GH_COUNT;
+  process.env.PATH = `${fakeGhRoot}:${originalPath ?? ""}`;
+  process.env.RALPH_FAKE_GH_LOG = fakeGhLog;
+  process.env.RALPH_FAKE_GH_COUNT = fakeGhCount;
+  try {
+    const result = await publishApprovedSpec(
+      repoRoot,
+      {
+        ...spec,
+        branchInstructions: {
+          ...spec.branchInstructions,
+          prTarget: "dev",
+        },
+      },
+      "Spec completed successfully.",
+      featureCommit,
+    );
+
+    assert.equal(result.branch, "feature/example");
+    assert.equal(result.remote, "origin");
+    assert.equal(result.prNumber, 42);
+    assert.equal(result.prUrl, "https://example.test/pr/42");
+    assert.equal(result.prCreated, true);
+    assert.equal(result.draft, true);
+    assert.deepEqual(result.labels, ["Prototype"]);
+
+    const { stdout: pushedBranch } = await execFile("git", ["ls-remote", "--heads", "origin", "feature/example"], {
+      cwd: repoRoot,
+    });
+    assert.match(pushedBranch, /refs\/heads\/feature\/example/);
+
+    const ghLog = await fs.readFile(fakeGhLog, "utf8");
+    assert.match(ghLog, /pr list --head feature\/example --state all --json number,url,isDraft/);
+    assert.match(ghLog, /pr create .*--head feature\/example .*--base dev/);
+    assert.match(ghLog, /--draft/);
+    assert.match(ghLog, /--label Prototype/);
+  } finally {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+    if (originalGhLog === undefined) {
+      delete process.env.RALPH_FAKE_GH_LOG;
+    } else {
+      process.env.RALPH_FAKE_GH_LOG = originalGhLog;
+    }
+    if (originalGhCount === undefined) {
+      delete process.env.RALPH_FAKE_GH_COUNT;
+    } else {
+      process.env.RALPH_FAKE_GH_COUNT = originalGhCount;
+    }
+  }
 });
 
 test("ensureCodexHome seeds auth and config from the user Codex home without overwriting local files", async () => {

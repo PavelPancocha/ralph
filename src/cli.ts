@@ -270,6 +270,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     : specPaths;
 
   let selected = filtered;
+  let skippedDueToDone: string[] = [];
   if (parsed.toSpec) {
     const matchingTargets = filtered.filter((specPath) => specPath.includes(parsed.toSpec as string));
     if (matchingTargets.length === 0) {
@@ -297,6 +298,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       console.log(`All specs through ${targetPath} are already done.`);
       return 0;
     }
+    skippedDueToDone = bounded.slice(0, firstPendingIndex);
     selected = bounded.slice(firstPendingIndex);
   }
 
@@ -317,6 +319,14 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
   const executeSpecFn = deps.executeSpec ?? executeSpec;
 
   let failures = 0;
+  if (skippedDueToDone.length > 0) {
+    const lastTarget = selected[selected.length - 1]!;
+    console.log(`Skipping ${skippedDueToDone.length} already done spec(s) before ${path.basename(lastTarget, ".md")}:`);
+    for (const skippedSpec of skippedDueToDone) {
+      console.log(`- ${path.basename(skippedSpec, ".md")}`);
+    }
+    console.log("");
+  }
   console.log(
     parsed.model
       ? `Running ${selected.length} spec(s) with model override=${parsed.model} maxIterations=${parsed.maxIterations}${parsed.resume ? " resume=true" : ""}`

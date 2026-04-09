@@ -26,6 +26,9 @@ export interface BranchInstructions {
   createBranch: string;
   prTarget?: string;
   nextSpecBase?: string;
+  createPr?: boolean;
+  draftPr?: boolean;
+  labels?: string[];
 }
 
 export interface SpecDocument {
@@ -122,6 +125,7 @@ export type WorkflowProgressPhase =
   | "implementing"
   | "reviewing"
   | "rechecking"
+  | "publishing"
   | "dry-run"
   | "done"
   | "failed";
@@ -208,6 +212,16 @@ export interface VerificationRun {
   commands: VerificationCommandResult[];
   summary: string;
   succeeded: boolean;
+}
+
+export interface PublicationResult {
+  branch: string;
+  remote: string;
+  prNumber?: number;
+  prUrl?: string;
+  prCreated: boolean;
+  draft: boolean;
+  labels: string[];
 }
 
 export interface ReviewFinding {

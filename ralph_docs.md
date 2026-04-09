@@ -47,6 +47,8 @@ For a runnable spec, Ralph executes this sequence:
    - `invalidate_plan`
 9. `supervisor`
    Produces the final `SupervisorOutcome`.
+10. Publication
+   After a successful final supervisor approval, Ralph pushes the feature branch and opens or updates the PR before the spec is marked `done`.
 
 If recheck returns `needs_fix`, the loop continues until `maxIterations` is reached.
 
@@ -54,6 +56,8 @@ If recheck returns `invalidate_plan`, Ralph clears planning-helper, supervisor, 
 
 If a spec is rerun after a prior failure, Ralph reuses the stored `lastError` as the restart context so the next planning pass starts from the last known problem instead of a blank slate.
 That retry also escalates the first implementation and review pass to the stronger model tier so the rerun does not fall back to the cheap initial policy.
+
+When `--to` trims the run to a bounded range, Ralph also logs any already-done specs that were skipped at the front of that range before it starts executing the remaining specs.
 
 If `--resume` is used, Ralph skips ahead to the latest feasible checkpoint it can reconstruct from the saved run state and artifacts. It prefers the furthest completed stage, then continues from there instead of replaying earlier completed work. The CLI prints a checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or fell back to a fresh run.
 
@@ -122,6 +126,7 @@ Responsible for:
 - resolving repository paths from workspace-relative spec metadata
 - creating and reusing git worktrees
 - copying `codex-support/` into the worktree as `.codex/`
+- publishing approved branches and pull requests
 
 #### `src/prompts.ts`
 
@@ -148,6 +153,7 @@ It:
 - writes structured JSON artifacts for each turn
 - emits progress events for terminal streaming and `.ralph/runs/.../events.log`
 - loops review/recheck iterations with role-aware model escalation
+- enters a dedicated `publishing` phase after approval
 - writes the final done report on success
 - seeds reruns from a prior `lastError` when a spec has already failed once, so `--to` retries start from the prior failure context
 - supports `--resume` by loading the latest feasible checkpoint from saved state and artifacts, then continuing from that stage when possible
@@ -227,10 +233,21 @@ The current parser recognizes:
 - `Create branch: ...`
 - `PR target: ...`
 - `Next spec base: ...`
+- `Open a PR for this spec branch.`
+- `Open a **draft** PR for this spec branch.`
+- `Apply labels: \`...\`, \`...\`.`
 
 The `Source branch` and `Create branch` fields are required.
 
 For a runnable spec, `Repo:`, `Workdir:`, and non-empty `Source branch` / `Create branch` values are the hard parser requirements. The remaining sections are parsed when present and scaffolded by `create-spec` because they produce better execution packets and reviews.
+
+Publication defaults:
+
+- Ralph always pushes the approved branch.
+- Ralph always opens or updates a PR.
+- The PR is draft by default unless the spec explicitly says `Open a PR for this spec branch.`
+- Ralph always applies the `Prototype` label.
+- `Apply labels: ...` adds extra labels on top of `Prototype`.
 
 The `run` command only picks runnable specs from the backlog. Draft or analysis files that match the filename pattern but do not satisfy that minimum contract are ignored until they are filled in.
 

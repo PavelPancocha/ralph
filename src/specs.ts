@@ -11,6 +11,9 @@ const branchInstructionsSchema = z.object({
   createBranch: z.string().min(1),
   prTarget: z.string().optional(),
   nextSpecBase: z.string().optional(),
+  createPr: z.boolean().optional(),
+  draftPr: z.boolean().optional(),
+  labels: z.array(z.string()).optional(),
 });
 
 function normalizeLine(line: string): string {
@@ -98,6 +101,11 @@ function parseInstructionValue(line: string, label: string): string | undefined 
   return rawValue;
 }
 
+function parseQuotedBacktickValues(line: string): string[] {
+  const matches = [...line.matchAll(/`([^`]+)`/g)];
+  return matches.map((match) => match[1]!.trim()).filter(Boolean);
+}
+
 function parseBranchInstructions(block: string | undefined): BranchInstructions {
   const lines = parseBulletList(block);
   const parsed: Partial<BranchInstructions> = {};
@@ -121,6 +129,20 @@ function parseBranchInstructions(block: string | undefined): BranchInstructions 
     const nextBase = parseInstructionValue(line, "Next spec base");
     if (nextBase !== undefined) {
       parsed.nextSpecBase = nextBase;
+      continue;
+    }
+    if (/^Open a \*\*draft\*\* PR for this spec branch\.?$/i.test(line)) {
+      parsed.createPr = true;
+      parsed.draftPr = true;
+      continue;
+    }
+    if (/^Open a PR for this spec branch\.?$/i.test(line)) {
+      parsed.createPr = true;
+      parsed.draftPr = false;
+      continue;
+    }
+    if (line.startsWith("Apply labels:")) {
+      parsed.labels = parseQuotedBacktickValues(line);
     }
   }
 
@@ -130,6 +152,9 @@ function parseBranchInstructions(block: string | undefined): BranchInstructions 
     createBranch: validated.createBranch,
     ...(validated.prTarget ? { prTarget: validated.prTarget } : {}),
     ...(validated.nextSpecBase ? { nextSpecBase: validated.nextSpecBase } : {}),
+    ...(validated.createPr !== undefined ? { createPr: validated.createPr } : {}),
+    ...(validated.draftPr !== undefined ? { draftPr: validated.draftPr } : {}),
+    ...(validated.labels?.length ? { labels: validated.labels } : {}),
   };
 }
 

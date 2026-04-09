@@ -20,7 +20,8 @@ For each spec, Ralph runs a fixed role pipeline:
 6. `review_lead` synthesizes the review set and can request one targeted stronger re-review when a topic is still ambiguous or high risk.
 7. Ralph runs the spec's verification commands on the host against the feature branch, then restores the previous branch and passes the transcript into recheck.
 8. `recheck` decides whether the implementation is approved, needs another fix loop, or invalidates the plan.
-9. `supervisor` closes the run and writes the final result.
+9. `supervisor` closes the run.
+10. After approval Ralph pushes the feature branch, opens or updates the PR, applies default publication metadata, and only then writes the final done result.
 
 The runner is file-first and local-first:
 
@@ -171,7 +172,16 @@ node dist/src/cli.js run --dry-run
 
 `run` streams per-spec progress to the terminal with `[current/total]` prefixes, phase changes, and a per-run log path under `.ralph/runs/<spec-id>/<run-id>/events.log`.
 
+When a spec is approved, Ralph does not stop at the local commit anymore. It enters a `publishing` phase that:
+
+- pushes the feature branch to `origin`
+- opens or updates the PR for that branch
+- defaults the PR to draft mode unless the spec explicitly overrides it
+- always applies the `Prototype` label, plus any extra labels declared in the spec
+- marks the spec `done` only after publication succeeds
+
 `--to <spec>` runs sequentially through the ordered backlog up to the matching target spec and starts from the first spec in that bounded range that is not already done.
+If earlier specs in that bounded range are already done, Ralph logs them explicitly as skipped before starting the remaining run.
 If a spec in that rerun range has already failed once, Ralph seeds the next attempt from the stored `lastError` so the rerun starts from the prior failure context instead of a blank planning pass. The first implementation and review pass on that retry use the stronger model tier instead of the cheap first-pass tier.
 
 `--resume` continues a previously started spec run from the latest feasible checkpoint instead of replaying the whole workflow from scratch. Ralph prefers the most advanced saved stage it can reconstruct from the run state and artifacts, then continues from there with the existing thread history when the saved policy still matches. It also prints a small checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or had to fall back to a fresh run.
@@ -185,6 +195,23 @@ Without `--model`, Ralph uses a smart role policy by default:
 - `gpt-5.4-mini` for planning helpers, first-pass implementation, and first-pass topic reviews
 - `gpt-5.4` with `xhigh` reasoning for supervisor, understander, review lead, recheck, and final closeout
 - implementation and targeted review escalation move from the cheaper first pass to the stronger policy only after rejection or invalidation
+
+### PR Publication Defaults
+
+Branch publication is now default runtime behavior. Specs no longer need to opt into PR creation.
+
+Default behavior after approval:
+
+- push the feature branch
+- open or update a PR targeting `PR target` when declared, otherwise `Source branch`
+- create the PR as draft by default
+- always apply the `Prototype` label
+
+Spec-level overrides still work:
+
+- `Open a PR for this spec branch.` switches the PR to non-draft
+- `Open a **draft** PR for this spec branch.` makes the draft intent explicit
+- `Apply labels: \`Label A\`, \`Label B\`.` adds extra labels on top of `Prototype`
 
 ## Requirements
 

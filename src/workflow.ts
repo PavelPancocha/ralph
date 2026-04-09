@@ -9,6 +9,7 @@ import type {
   ImplementationReport,
   PlanningLens,
   PlanningView,
+  PublicationResult,
   RalphRunOptions,
   RecheckVerdict,
   ReviewLeadReport,
@@ -51,6 +52,7 @@ import {
   saveDoneReport,
   saveRunState,
   runVerificationCommands,
+  publishApprovedSpec,
   validateImplementationCandidate,
   worktreeAdditionalDirectories,
 } from "./runtime.js";
@@ -492,6 +494,12 @@ export interface WorkflowDependencies {
     featureBranch: string,
     commands: string[],
   ) => Promise<VerificationRun>;
+  publishApprovedSpec?: (
+    repoPath: string,
+    spec: SpecDocument,
+    summary: string,
+    candidateCommit: string,
+  ) => Promise<PublicationResult>;
   onProgress?: (event: WorkflowProgressEvent) => void | Promise<void>;
 }
 
@@ -997,6 +1005,7 @@ export async function executeSpec(
 
   const codexFactory = deps.createCodex ?? createCodex;
   const implementationCandidateValidator = deps.validateImplementationCandidate ?? validateImplementationCandidate;
+  const approvedSpecPublisher = deps.publishApprovedSpec ?? publishApprovedSpec;
   const codex = codexFactory(paths, resolveModel(options.model, defaultPrimaryModel));
 
   let invalidationReason = state.invalidationReason;
@@ -1010,6 +1019,60 @@ export async function executeSpec(
   let shouldReplan = true;
   let verificationRun: VerificationRun | undefined;
   const retryingFromFailure = restartFailureContext !== undefined;
+
+  const finalizeApprovedSpec = async (
+    iteration: number,
+    summary: string,
+    candidateCommit: string,
+    nextAction: string,
+  ): Promise<SupervisorOutcome> => {
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "publishing",
+      iteration,
+      summary: "pushing branch and updating pull request",
+      candidateCommit,
+    });
+    try {
+      await approvedSpecPublisher(repoPath, spec, summary, candidateCommit);
+    } catch (error) {
+      const message = error instanceof Error ? error.stack ?? error.message : String(error);
+      state.status = "failed";
+      state.lastError = `Publication failed for spec ${spec.specId}: ${message}`;
+      state.lastCommit = candidateCommit;
+      await saveRunState(paths, state);
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "failed",
+        iteration,
+        summary: state.lastError,
+        candidateCommit,
+      });
+      return {
+        status: "failed",
+        summary: state.lastError,
+        candidateCommit,
+        nextAction: "Inspect git push / GitHub PR access and rerun with --resume.",
+      };
+    }
+
+    await saveDoneReport(paths, spec, summary, candidateCommit);
+    state.status = "done";
+    state.lastCommit = candidateCommit;
+    state.lastError = undefined;
+    state.invalidationReason = undefined;
+    await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "done",
+      iteration,
+      summary,
+      candidateCommit,
+    });
+    return {
+      status: "done",
+      summary,
+      candidateCommit,
+      nextAction,
+    };
+  };
 
   if (resumeCheckpoint) {
     invalidationReason = resumeCheckpoint.invalidationReason ?? invalidationReason;
@@ -1300,24 +1363,12 @@ export async function executeSpec(
         };
       }
 
-      await saveDoneReport(paths, spec, supervisorFinal.output.summary, currentImplementation.commitHash);
-      state.status = "done";
-      state.lastCommit = currentImplementation.commitHash;
-      state.lastError = undefined;
-      state.invalidationReason = undefined;
-      await saveRunState(paths, state);
-      await emitProgress(paths, spec, runId, deps, {
-        phase: "done",
+      return finalizeApprovedSpec(
         iteration,
-        summary: supervisorFinal.output.summary,
-        candidateCommit: currentImplementation.commitHash,
-      });
-      return {
-        status: "done",
-        summary: supervisorFinal.output.summary,
-        candidateCommit: currentImplementation.commitHash,
-        nextAction: supervisorFinal.output.nextAction,
-      };
+        supervisorFinal.output.summary,
+        currentImplementation.commitHash,
+        supervisorFinal.output.nextAction,
+      );
     }
 
     if (recheck.output.verdict === "invalidate_plan") {
@@ -1398,24 +1449,12 @@ export async function executeSpec(
           };
         }
 
-        await saveDoneReport(paths, spec, supervisorFinal.output.summary, implementationReport.commitHash);
-        state.status = "done";
-        state.lastCommit = implementationReport.commitHash;
-        state.lastError = undefined;
-        state.invalidationReason = undefined;
-        await saveRunState(paths, state);
-        await emitProgress(paths, spec, runId, deps, {
-          phase: "done",
+        return finalizeApprovedSpec(
           iteration,
-          summary: supervisorFinal.output.summary,
-          candidateCommit: implementationReport.commitHash,
-        });
-        return {
-          status: "done",
-          summary: supervisorFinal.output.summary,
-          candidateCommit: implementationReport.commitHash,
-          nextAction: supervisorFinal.output.nextAction,
-        };
+          supervisorFinal.output.summary,
+          implementationReport.commitHash,
+          supervisorFinal.output.nextAction,
+        );
       }
 
       if (resumeCheckpoint.stage === "implementing") {
@@ -1711,22 +1750,10 @@ export async function executeSpec(
     };
   }
 
-  await saveDoneReport(paths, spec, supervisorFinal.output.summary, implementationReport.commitHash);
-  state.status = "done";
-  state.lastCommit = implementationReport.commitHash;
-  state.lastError = undefined;
-  state.invalidationReason = undefined;
-  await saveRunState(paths, state);
-  await emitProgress(paths, spec, runId, deps, {
-    phase: "done",
-    iteration: state.currentIteration,
-    summary: supervisorFinal.output.summary,
-    candidateCommit: implementationReport.commitHash,
-  });
-  return {
-    status: "done",
-    summary: supervisorFinal.output.summary,
-    candidateCommit: implementationReport.commitHash,
-    nextAction: supervisorFinal.output.nextAction,
-  };
+  return finalizeApprovedSpec(
+    state.currentIteration,
+    supervisorFinal.output.summary,
+    implementationReport.commitHash,
+    supervisorFinal.output.nextAction,
+  );
 }

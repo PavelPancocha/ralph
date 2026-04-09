@@ -8,6 +8,7 @@ import type {
   AgentThreadPolicies,
   AgentThreadRefs,
   ImplementationReport,
+  PublicationResult,
   ReviewFinding,
   RuntimePaths,
   RunState,
@@ -417,6 +418,129 @@ async function runShellCommand(
       });
     });
   });
+}
+
+async function execTool(
+  command: string,
+  args: string[],
+  cwd: string,
+): Promise<{ stdout: string; stderr: string }> {
+  return execFileAsync(command, args, { cwd, env: { ...process.env } });
+}
+
+interface GithubPullRequestSummary {
+  number: number;
+  url: string;
+  isDraft: boolean;
+}
+
+async function listPullRequestsForBranch(repoPath: string, branch: string): Promise<GithubPullRequestSummary[]> {
+  const { stdout } = await execTool(
+    "gh",
+    ["pr", "list", "--head", branch, "--state", "all", "--json", "number,url,isDraft"],
+    repoPath,
+  );
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Unexpected gh pr list response for branch ${branch}.`);
+  }
+  return parsed
+    .filter((item): item is GithubPullRequestSummary => {
+      return isRecord(item)
+        && typeof item.number === "number"
+        && typeof item.url === "string"
+        && typeof item.isDraft === "boolean";
+    });
+}
+
+function publicationSummaryBody(spec: SpecDocument, summary: string, candidateCommit: string): string {
+  return [
+    `Spec: ${spec.relFromSpecs}`,
+    `Commit: ${candidateCommit}`,
+    "",
+    summary,
+  ].join("\n");
+}
+
+export async function publishApprovedSpec(
+  repoPath: string,
+  spec: SpecDocument,
+  summary: string,
+  candidateCommit: string,
+): Promise<PublicationResult> {
+  const branch = spec.branchInstructions.createBranch;
+  const remote = "origin";
+  await execTool("git", ["-C", repoPath, "push", "-u", remote, branch], repoPath);
+
+  const baseBranch = spec.branchInstructions.prTarget ?? spec.branchInstructions.sourceBranch;
+  const shouldCreatePr = spec.branchInstructions.createPr ?? true;
+  const draft = spec.branchInstructions.draftPr ?? true;
+  const labels = [...new Set(["Prototype", ...(spec.branchInstructions.labels ?? [])])];
+
+  if (!shouldCreatePr) {
+    return {
+      branch,
+      remote,
+      prCreated: false,
+      draft,
+      labels,
+    };
+  }
+
+  let existing = (await listPullRequestsForBranch(repoPath, branch))[0];
+  let prCreated = false;
+  if (!existing) {
+    const createArgs = [
+      "pr",
+      "create",
+      "--head",
+      branch,
+      "--base",
+      baseBranch,
+      "--title",
+      spec.title,
+      "--body",
+      publicationSummaryBody(spec, summary, candidateCommit),
+    ];
+    if (draft) {
+      createArgs.push("--draft");
+    }
+    for (const label of labels) {
+      createArgs.push("--label", label);
+    }
+    await execTool("gh", createArgs, repoPath);
+    existing = (await listPullRequestsForBranch(repoPath, branch))[0];
+    if (!existing) {
+      throw new Error(`Pull request creation succeeded but no PR was found for branch ${branch}.`);
+    }
+    prCreated = true;
+  } else {
+    const editArgs = [
+      "pr",
+      "edit",
+      String(existing.number),
+      "--base",
+      baseBranch,
+      "--title",
+      spec.title,
+      "--body",
+      publicationSummaryBody(spec, summary, candidateCommit),
+    ];
+    for (const label of labels) {
+      editArgs.push("--add-label", label);
+    }
+    await execTool("gh", editArgs, repoPath);
+  }
+
+  return {
+    branch,
+    remote,
+    prNumber: existing.number,
+    prUrl: existing.url,
+    prCreated,
+    draft: draft || existing.isDraft,
+    labels,
+  };
 }
 
 async function ignoreWorktreePath(worktreePath: string, pattern: string): Promise<void> {

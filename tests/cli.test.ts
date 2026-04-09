@@ -439,6 +439,11 @@ test("runCommand with --to starts from the first spec that is not already done",
 
   const previousCwd = process.cwd();
   const executedSpecIds: string[] = [];
+  let logOutput = "";
+  const originalLog = console.log;
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
   process.chdir(tempRoot);
   try {
     const exitCode = await runCommand(
@@ -468,9 +473,13 @@ test("runCommand with --to starts from the first spec that is not already done",
     assert.equal(exitCode, 0);
   } finally {
     process.chdir(previousCwd);
+    console.log = originalLog;
   }
 
   assert.deepEqual(executedSpecIds, ["1003-three", "1004-four"]);
+  assert.match(logOutput, /Skipping 2 already done spec\(s\) before 1004-four:/);
+  assert.match(logOutput, /- 1001-one/);
+  assert.match(logOutput, /- 1002-two/);
 });
 
 test("runCommand keeps going after a failed spec outcome and exits 1 after the full pass", async () => {
