@@ -59,7 +59,7 @@ That retry also escalates the first implementation and review pass to the strong
 
 Before execution, Ralph skips any specs that are already done and logs them explicitly.
 
-If `--resume` is used, Ralph skips ahead to the latest feasible checkpoint it can reconstruct from the saved run state and artifacts. It prefers the furthest completed stage, then continues from there instead of replaying earlier completed work. The CLI prints a checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or fell back to a fresh run.
+If `--resume` is used, Ralph skips ahead to the latest feasible checkpoint it can reconstruct from the saved run state and artifacts. It prefers the furthest completed stage, restores saved planning context when it is available, and then continues from there instead of replaying earlier completed work. Ralph only advances the durable checkpoint pointer after it has written a new structured artifact, so an early setup failure does not make the previous resumable run disappear. The CLI prints a checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or fell back to a fresh run.
 
 ## Default Model Policy
 

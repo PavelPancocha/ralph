@@ -11,8 +11,10 @@ import { parseSpecFile } from "../src/specs.js";
 import { executeSpec } from "../src/workflow.js";
 import type {
   CodexThreadConfig,
+  ImplementationReport,
   PublicationResult,
   RalphRunOptions,
+  ReviewFinding,
   RunState,
   RuntimePaths,
   VerificationRun,
@@ -101,6 +103,11 @@ function fakeWorkflowDeps(
   fakeCodex: FakeCodex,
   overrides: {
     onProgress?: (event: WorkflowProgressEvent) => void | Promise<void>;
+    validateImplementationCandidate?: (
+      worktreePath: string,
+      report: ImplementationReport,
+      baseRef?: string,
+    ) => Promise<ReviewFinding | null>;
     runVerificationCommands?: (repoPath: string, featureBranch: string, commands: string[]) => Promise<VerificationRun>;
     publishApprovedSpec?: (
       repoPath: string,
@@ -927,6 +934,276 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
   assert.equal(
     fakeCodex.threadConfigs.some((entry) => entry.method === "resume" && entry.threadId === "saved-supervisor"),
     true,
+  );
+});
+
+test("executeSpec keeps the prior durable runId when a resumed attempt fails before the first new artifact", async () => {
+  const { projectRoot, workspaceRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const priorRunId = "saved-run";
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "failed",
+      currentIteration: 1,
+      runId: priorRunId,
+      worktreePath: expectedWorktreePath,
+      lastCommit: undefined,
+      lastError: "Previous run failed before checkpointing.",
+      updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+    }, null, 2)}
+`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    executeSpec(
+      paths,
+      {
+        workspaceRoot,
+        projectRoot,
+        model: undefined,
+        maxIterations: 2,
+        dryRun: false,
+        resume: true,
+        specFilters: [],
+      },
+      spec,
+      fakeWorkflowDeps(new FakeCodex([]), {
+        onProgress: (event) => {
+          if (event.phase === "setup") {
+            throw new Error("interrupt during setup");
+          }
+        },
+      }),
+    ),
+    /interrupt during setup/,
+  );
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.runId, priorRunId);
+});
+
+test("executeSpec reuses restored planning context after resumed implementation validation failure", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const savedRunId = "saved-run";
+  const firstRetryCommit = "2468246824682468246824682468246824682468";
+  const secondRetryCommit = "9753197531975319753197531975319753197531";
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "failed",
+      currentIteration: 1,
+      runId: savedRunId,
+      worktreePath: expectedWorktreePath,
+      lastCommit: firstRetryCommit,
+      lastError: "Previous attempt needs targeted fixes.",
+      updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+    }, null, 2)}
+`,
+    "utf8",
+  );
+
+  await writeArtifactJson(paths, spec.specId, savedRunId, "planning_spec-1", {
+    role: "planning_spec",
+    turnId: "planning_spec:saved-run",
+    threadId: "saved-planning-spec",
+    output: JSON.parse(planningViewResponse("spec", "Saved spec view.")),
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+  await writeArtifactJson(paths, spec.specId, savedRunId, "planning_repo-1", {
+    role: "planning_repo",
+    turnId: "planning_repo:saved-run",
+    threadId: "saved-planning-repo",
+    output: JSON.parse(planningViewResponse("repo", "Saved repo view.", {
+      suggestedFiles: [path.join(repoRoot, "README.md")],
+    })),
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+  await writeArtifactJson(paths, spec.specId, savedRunId, "planning_risks-1", {
+    role: "planning_risks",
+    turnId: "planning_risks:saved-run",
+    threadId: "saved-planning-risks",
+    output: JSON.parse(planningViewResponse("risks", "Saved risk view.")),
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+  await writeArtifactJson(paths, spec.specId, savedRunId, "supervisor-1", {
+    role: "supervisor",
+    turnId: "supervisor:saved-run",
+    threadId: "saved-supervisor",
+    output: {
+      summary: "Saved supervisor strategy.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    },
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+  await writeArtifactJson(paths, spec.specId, savedRunId, "understander-1", {
+    role: "understander",
+    turnId: "understander:saved-run",
+    threadId: "saved-understander",
+    output: {
+      summary: "Saved understanding packet.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run verification"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    },
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+  await writeArtifactJson(paths, spec.specId, savedRunId, "recheck-1", {
+    role: "recheck",
+    turnId: "recheck:saved-run",
+    threadId: "saved-recheck",
+    output: {
+      verdict: "needs_fix",
+      summary: "Tighten the implementation based on the previous findings.",
+      acceptedFindings: [
+        {
+          severity: "warning",
+          category: "tests",
+          title: "Retry required",
+          detail: "The previous retry needs one more pass.",
+          action: "Tighten the retry without re-planning.",
+        },
+      ],
+      rejectedFindings: [],
+      fixInstructions: ["Tighten the retry without re-planning."],
+    },
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+
+  let validationCalls = 0;
+  const fakeCodex = new FakeCodex([
+    JSON.stringify({
+      summary: "Resumed implementer retry.",
+      commitHash: firstRetryCommit,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      summary: "Rebuilt understanding from restored strategy.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run verification again"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed the fixed retry.",
+      commitHash: secondRetryCommit,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse("Recovered review is ready."),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "The resumed retry is acceptable.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully after resumed retry.",
+      candidateCommit: secondRetryCommit,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 3,
+      dryRun: false,
+      resume: true,
+      specFilters: [],
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      validateImplementationCandidate: async () => {
+        validationCalls += 1;
+        if (validationCalls === 1) {
+          return {
+            severity: "warning",
+            category: "tests",
+            title: "Retry still incomplete",
+            detail: "The resumed retry still needs one more pass.",
+            action: "Retry once more using the same plan.",
+          };
+        }
+        return null;
+      },
+    }),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.equal(validationCalls, 2);
+  assert.equal(
+    fakeCodex.prompts.filter((entry) => entry.prompt.includes("You are Ralph's planning helper")).length,
+    0,
+  );
+  assert.equal(
+    fakeCodex.prompts.filter((entry) => entry.prompt.includes("You are the understander agent for Ralph.")).length,
+    1,
   );
 });
 

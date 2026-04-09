@@ -595,16 +595,6 @@ async function runStructuredTurn<T>(
     : codex.startThread(roleThreadOptions(options));
   const turn = await thread.run(prompt, { outputSchema: schema.json });
   const parsed = schema.zod.parse(JSON.parse(turn.finalResponse)) as T;
-  if (thread.id === null) {
-    console.warn(`[ralph] Thread id missing for role=${options.role}, spec=${spec.specId}; resume context may be lost.`);
-    state.threads[threadKey] = undefined;
-    state.threadPolicies[threadKey] = undefined;
-  } else {
-    state.threads[threadKey] = thread.id;
-    state.threadPolicies[threadKey] = policyFingerprint;
-  }
-  state.updatedAt = new Date().toISOString();
-  await saveRunState(paths, state);
   const artifact: AgentRunArtifact<T> = {
     role: options.role,
     turnId: `${options.role}:${runId}`,
@@ -622,6 +612,17 @@ async function runStructuredTurn<T>(
   };
   const artifactIteration = state.currentIteration > 0 ? state.currentIteration : "setup";
   await saveArtifact(paths, spec.specId, runId, `${options.role}-${artifactIteration}`, artifact);
+  if (thread.id === null) {
+    console.warn(`[ralph] Thread id missing for role=${options.role}, spec=${spec.specId}; resume context may be lost.`);
+    state.threads[threadKey] = undefined;
+    state.threadPolicies[threadKey] = undefined;
+  } else {
+    state.threads[threadKey] = thread.id;
+    state.threadPolicies[threadKey] = policyFingerprint;
+  }
+  state.runId = runId;
+  state.updatedAt = new Date().toISOString();
+  await saveRunState(paths, state);
   return artifact;
 }
 
@@ -688,6 +689,8 @@ interface ResumeCheckpoint {
   stage: ResumeStage;
   seedIteration: number;
   startIteration: number;
+  planningViews?: PlanningView[];
+  supervisorStrategy?: AgentRunArtifact<SupervisorStrategy>;
   understanding?: AgentRunArtifact<UnderstandingPacket>;
   implementation?: AgentRunArtifact<ImplementationReport>;
   reviewerOutputs?: ReviewerReport[];
@@ -707,6 +710,31 @@ async function loadAgentArtifact<T>(
   return readArtifactJson<AgentRunArtifact<T>>(paths, specId, runId, name);
 }
 
+async function loadPlanningCheckpointArtifacts(
+  paths: RuntimePaths,
+  specId: string,
+  runId: string,
+  seedIteration: number,
+): Promise<{
+  planningViews?: PlanningView[];
+  supervisorStrategy?: AgentRunArtifact<SupervisorStrategy>;
+}> {
+  const [planningSpec, planningRepo, planningRisks, supervisorStrategy] = await Promise.all([
+    loadAgentArtifact<PlanningView>(paths, specId, runId, `planning_spec-${seedIteration}`),
+    loadAgentArtifact<PlanningView>(paths, specId, runId, `planning_repo-${seedIteration}`),
+    loadAgentArtifact<PlanningView>(paths, specId, runId, `planning_risks-${seedIteration}`),
+    loadAgentArtifact<SupervisorStrategy>(paths, specId, runId, `supervisor-${seedIteration}`),
+  ]);
+  const planningArtifacts = [planningSpec, planningRepo, planningRisks];
+  const planningViews = planningArtifacts.every((artifact) => artifact !== null)
+    ? planningArtifacts.map((artifact) => artifact.output)
+    : undefined;
+  return {
+    ...(planningViews ? { planningViews } : {}),
+    ...(supervisorStrategy ? { supervisorStrategy } : {}),
+  };
+}
+
 async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, state: RunState): Promise<ResumeCheckpoint | null> {
   if (!state.runId) {
     return null;
@@ -714,6 +742,7 @@ async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, st
 
   const runId = state.runId;
   const seedIteration = state.currentIteration > 0 ? state.currentIteration : 1;
+  const planningCheckpoint = await loadPlanningCheckpointArtifacts(paths, spec.specId, runId, seedIteration);
   const understanding = await loadAgentArtifact<UnderstandingPacket>(paths, spec.specId, runId, `understander-${seedIteration}`);
   const implementation = await loadAgentArtifact<ImplementationReport>(paths, spec.specId, runId, `implementer-${seedIteration}`);
   const reviewLead = await loadAgentArtifact<ReviewLeadReport>(paths, spec.specId, runId, `review_lead-${seedIteration}`);
@@ -733,6 +762,7 @@ async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, st
       stage: "implementing",
       seedIteration,
       startIteration: seedIteration + 1,
+      ...planningCheckpoint,
       ...(understanding ? { understanding } : {}),
       acceptedFindings: recheckVerdict.output.acceptedFindings,
     };
@@ -754,6 +784,7 @@ async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, st
       stage: "supervisor_final",
       seedIteration,
       startIteration: seedIteration,
+      ...planningCheckpoint,
       ...(understanding ? { understanding } : {}),
       ...(implementation ? { implementation } : {}),
       reviewerOutputs,
@@ -769,6 +800,7 @@ async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, st
       stage: "rechecking",
       seedIteration,
       startIteration: seedIteration,
+      ...planningCheckpoint,
       ...(understanding ? { understanding } : {}),
       ...(implementation ? { implementation } : {}),
       reviewerOutputs,
@@ -783,6 +815,7 @@ async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, st
       stage: "reviewing",
       seedIteration,
       startIteration: seedIteration,
+      ...planningCheckpoint,
       ...(understanding ? { understanding } : {}),
       ...(implementation ? { implementation } : {}),
       reviewerOutputs: [],
@@ -795,6 +828,7 @@ async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, st
       stage: "implementing",
       seedIteration,
       startIteration: seedIteration,
+      ...planningCheckpoint,
       understanding,
       acceptedFindings: [],
     };
@@ -956,7 +990,6 @@ export async function executeSpec(
     console.log(formatResumeCheckpointMessage(resumeCheckpoint));
   }
   const runId = createRunId();
-  state.runId = runId;
   state.updatedAt = new Date().toISOString();
   const restartFailureContext = state.invalidationReason ?? state.lastError;
 
@@ -1074,9 +1107,150 @@ export async function executeSpec(
     };
   };
 
+  const failSupervisorFinal = async (
+    iteration: number,
+    summary: string,
+    candidateCommit: string,
+    nextAction: string,
+  ): Promise<SupervisorOutcome> => {
+    state.status = "failed";
+    state.lastError = summary;
+    await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "failed",
+      iteration: state.currentIteration,
+      summary,
+      candidateCommit,
+    });
+    return {
+      status: "failed",
+      summary,
+      candidateCommit,
+      nextAction,
+    };
+  };
+
+  const runSupervisorFinalDecision = async (
+    iteration: number,
+    currentUnderstanding: UnderstandingPacket,
+    currentImplementation: ImplementationReport,
+    currentRecheckVerdict: RecheckVerdict,
+  ): Promise<SupervisorOutcome> => {
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "rechecking",
+      iteration,
+      summary: "running supervisor final decision",
+      candidateCommit: currentImplementation.commitHash,
+    });
+    const supervisorFinal = await runStructuredTurn(
+      codex,
+      paths,
+      spec,
+      state,
+      runId,
+      supervisorOptions(options.model, worktreePath, additionalDirectories),
+      supervisorOutcomeOutputSchema,
+      buildSupervisorFinalPrompt(spec, currentUnderstanding, currentImplementation, currentRecheckVerdict),
+    );
+
+    if (supervisorFinal.output.status !== "done") {
+      return failSupervisorFinal(
+        iteration,
+        supervisorFinal.output.summary,
+        currentImplementation.commitHash,
+        supervisorFinal.output.nextAction,
+      );
+    }
+
+    return finalizeApprovedSpec(
+      iteration,
+      supervisorFinal.output.summary,
+      currentImplementation.commitHash,
+      supervisorFinal.output.nextAction,
+    );
+  };
+
+  const handleImplementationValidationFailure = async (
+    iteration: number,
+    currentImplementation: ImplementationReport,
+    validationFinding: ReviewFinding,
+  ): Promise<void> => {
+    acceptedFindings = [...acceptedFindings, validationFinding];
+    state.lastCommit = undefined;
+    state.lastError = validationFinding.detail;
+    state.status = "planning";
+    shouldReplan = supervisorStrategy === undefined;
+    await saveRunState(paths, state);
+    await saveArtifact(paths, spec.specId, runId, `implementation-validation-${iteration}`, {
+      report: currentImplementation,
+      finding: validationFinding,
+    });
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "planning",
+      iteration,
+      summary: `candidate validation failed: ${validationFinding.detail}`,
+    });
+  };
+
+  const runImplementationPass = async (
+    iteration: number,
+    currentUnderstanding: UnderstandingPacket,
+    escalated: boolean,
+  ): Promise<ImplementationReport | null> => {
+    state.status = "implementing";
+    await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "implementing",
+      iteration,
+      summary: "running implementer",
+    });
+    const implementation = await runStructuredTurn(
+      codex,
+      paths,
+      spec,
+      state,
+      runId,
+      implementerOptions(options.model, worktreePath, additionalDirectories, escalated),
+      implementationReportOutputSchema,
+      buildImplementerPrompt(
+        spec,
+        currentUnderstanding,
+        worktreePath,
+        implementationPromptFixes(acceptedFindings),
+        escalated,
+      ),
+    );
+    const normalizedImplementation = await normalizeImplementationChangedFiles(
+      worktreePath,
+      implementation.output,
+      spec.branchInstructions.sourceBranch,
+    );
+    implementation.output.changedFiles = normalizedImplementation.changedFiles;
+    const implementationValidation = await implementationCandidateValidator(
+      worktreePath,
+      normalizedImplementation,
+      spec.branchInstructions.sourceBranch,
+    );
+    if (implementationValidation) {
+      await handleImplementationValidationFailure(iteration, normalizedImplementation, implementationValidation);
+      return null;
+    }
+    state.lastCommit = normalizedImplementation.commitHash;
+    await saveRunState(paths, state);
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "implementing",
+      iteration,
+      summary: "candidate commit validated",
+      candidateCommit: normalizedImplementation.commitHash,
+    });
+    return normalizedImplementation;
+  };
+
   if (resumeCheckpoint) {
     invalidationReason = resumeCheckpoint.invalidationReason ?? invalidationReason;
     acceptedFindings = [...resumeCheckpoint.acceptedFindings];
+    planningViews = [...(resumeCheckpoint.planningViews ?? [])];
+    supervisorStrategy = resumeCheckpoint.supervisorStrategy;
     understandingPacket = resumeCheckpoint.understanding?.output;
     implementationReport = resumeCheckpoint.implementation?.output;
     recheckVerdict = resumeCheckpoint.recheckVerdict?.output;
@@ -1328,47 +1502,7 @@ export async function executeSpec(
     acceptedFindings = recheck.output.acceptedFindings;
 
     if (recheck.output.verdict === "approve") {
-      await emitProgress(paths, spec, runId, deps, {
-        phase: "rechecking",
-        iteration,
-        summary: "running supervisor final decision",
-        candidateCommit: currentImplementation.commitHash,
-      });
-      const supervisorFinal = await runStructuredTurn(
-        codex,
-        paths,
-        spec,
-        state,
-        runId,
-        supervisorOptions(options.model, worktreePath, additionalDirectories),
-        supervisorOutcomeOutputSchema,
-        buildSupervisorFinalPrompt(spec, currentUnderstanding, currentImplementation, recheck.output),
-      );
-
-      if (supervisorFinal.output.status !== "done") {
-        state.status = "failed";
-        state.lastError = supervisorFinal.output.summary;
-        await saveRunState(paths, state);
-        await emitProgress(paths, spec, runId, deps, {
-          phase: "failed",
-          iteration: state.currentIteration,
-          summary: supervisorFinal.output.summary,
-          candidateCommit: currentImplementation.commitHash,
-        });
-        return {
-          status: "failed",
-          summary: supervisorFinal.output.summary,
-          candidateCommit: currentImplementation.commitHash,
-          nextAction: supervisorFinal.output.nextAction,
-        };
-      }
-
-      return finalizeApprovedSpec(
-        iteration,
-        supervisorFinal.output.summary,
-        currentImplementation.commitHash,
-        supervisorFinal.output.nextAction,
-      );
+      return runSupervisorFinalDecision(iteration, currentUnderstanding, currentImplementation, recheck.output);
     }
 
     if (recheck.output.verdict === "invalidate_plan") {
@@ -1414,47 +1548,7 @@ export async function executeSpec(
         understandingPacket = resumeCheckpoint.understanding.output;
         implementationReport = resumeCheckpoint.implementation.output;
         recheckVerdict = resumeCheckpoint.recheckVerdict.output;
-        await emitProgress(paths, spec, runId, deps, {
-          phase: "rechecking",
-          iteration,
-          summary: "running supervisor final decision",
-          candidateCommit: implementationReport.commitHash,
-        });
-        const supervisorFinal = await runStructuredTurn(
-          codex,
-          paths,
-          spec,
-          state,
-          runId,
-          supervisorOptions(options.model, worktreePath, additionalDirectories),
-          supervisorOutcomeOutputSchema,
-          buildSupervisorFinalPrompt(spec, understandingPacket, implementationReport, recheckVerdict),
-        );
-
-        if (supervisorFinal.output.status !== "done") {
-          state.status = "failed";
-          state.lastError = supervisorFinal.output.summary;
-          await saveRunState(paths, state);
-          await emitProgress(paths, spec, runId, deps, {
-            phase: "failed",
-            iteration: state.currentIteration,
-            summary: supervisorFinal.output.summary,
-            candidateCommit: implementationReport.commitHash,
-          });
-          return {
-            status: "failed",
-            summary: supervisorFinal.output.summary,
-            candidateCommit: implementationReport.commitHash,
-            nextAction: supervisorFinal.output.nextAction,
-          };
-        }
-
-        return finalizeApprovedSpec(
-          iteration,
-          supervisorFinal.output.summary,
-          implementationReport.commitHash,
-          supervisorFinal.output.nextAction,
-        );
+        return runSupervisorFinalDecision(iteration, understandingPacket, implementationReport, recheckVerdict);
       }
 
       if (resumeCheckpoint.stage === "implementing") {
@@ -1462,67 +1556,15 @@ export async function executeSpec(
           throw new Error(`Resume checkpoint for spec ${spec.specId} is missing understanding artifacts.`);
         }
         understandingPacket = resumeCheckpoint.understanding.output;
-        const resumeImplementerEscalated = iteration > 1 || retryingFromFailure;
-        state.status = "implementing";
-        await saveRunState(paths, state);
-        await emitProgress(paths, spec, runId, deps, {
-          phase: "implementing",
+        const resumedImplementation = await runImplementationPass(
           iteration,
-          summary: "running implementer",
-        });
-        const implementation = await runStructuredTurn(
-          codex,
-          paths,
-          spec,
-          state,
-          runId,
-          implementerOptions(options.model, worktreePath, additionalDirectories, resumeImplementerEscalated),
-          implementationReportOutputSchema,
-          buildImplementerPrompt(
-            spec,
-            understandingPacket,
-            worktreePath,
-            implementationPromptFixes(acceptedFindings),
-            resumeImplementerEscalated,
-          ),
+          understandingPacket,
+          iteration > 1 || retryingFromFailure,
         );
-        implementationReport = await normalizeImplementationChangedFiles(
-          worktreePath,
-          implementation.output,
-          spec.branchInstructions.sourceBranch,
-        );
-        implementation.output.changedFiles = implementationReport.changedFiles;
-        const implementationValidation = await implementationCandidateValidator(
-          worktreePath,
-          implementationReport,
-          spec.branchInstructions.sourceBranch,
-        );
-        if (implementationValidation) {
-          acceptedFindings = [...acceptedFindings, implementationValidation];
-          state.lastCommit = undefined;
-          state.lastError = implementationValidation.detail;
-          state.status = "planning";
-          shouldReplan = true;
-          await saveRunState(paths, state);
-          await saveArtifact(paths, spec.specId, runId, `implementation-validation-${iteration}`, {
-            report: implementationReport,
-            finding: implementationValidation,
-          });
-          await emitProgress(paths, spec, runId, deps, {
-            phase: "planning",
-            iteration,
-            summary: `candidate validation failed: ${implementationValidation.detail}`,
-          });
+        if (!resumedImplementation) {
           continue;
         }
-        state.lastCommit = implementationReport.commitHash;
-        await saveRunState(paths, state);
-        await emitProgress(paths, spec, runId, deps, {
-          phase: "implementing",
-          iteration,
-          summary: "candidate commit validated",
-          candidateCommit: implementationReport.commitHash,
-        });
+        implementationReport = resumedImplementation;
       }
 
       if (resumeCheckpoint.stage === "reviewing" || resumeCheckpoint.stage === "rechecking") {
@@ -1547,7 +1589,7 @@ export async function executeSpec(
           : null,
         );
         if (resumedOutcome === "continue") {
-          shouldReplan = true;
+          shouldReplan = shouldReplan || supervisorStrategy === undefined;
           continue;
         }
         return resumedOutcome;
@@ -1599,65 +1641,15 @@ export async function executeSpec(
       ].join("\n"),
     );
 
-    state.status = "implementing";
-    await saveRunState(paths, state);
-    await emitProgress(paths, spec, runId, deps, {
-      phase: "implementing",
+    const freshImplementation = await runImplementationPass(
       iteration,
-      summary: "running implementer",
-    });
-    const implementation = await runStructuredTurn(
-      codex,
-      paths,
-      spec,
-      state,
-      runId,
-      implementerOptions(options.model, worktreePath, additionalDirectories, iteration > 1 || retryingFromFailure),
-      implementationReportOutputSchema,
-      buildImplementerPrompt(
-        spec,
-        understanding.output,
-        worktreePath,
-        implementationPromptFixes(acceptedFindings),
-        iteration > 1 || retryingFromFailure,
-      ),
+      understanding.output,
+      iteration > 1 || retryingFromFailure,
     );
-    implementationReport = await normalizeImplementationChangedFiles(
-      worktreePath,
-      implementation.output,
-      spec.branchInstructions.sourceBranch,
-    );
-    implementation.output.changedFiles = implementationReport.changedFiles;
-    const implementationValidation = await implementationCandidateValidator(
-      worktreePath,
-      implementationReport,
-      spec.branchInstructions.sourceBranch,
-    );
-    if (implementationValidation) {
-      acceptedFindings = [...acceptedFindings, implementationValidation];
-      state.lastCommit = undefined;
-      state.lastError = implementationValidation.detail;
-      state.status = "planning";
-      await saveRunState(paths, state);
-      await saveArtifact(paths, spec.specId, runId, `implementation-validation-${iteration}`, {
-        report: implementationReport,
-        finding: implementationValidation,
-      });
-      await emitProgress(paths, spec, runId, deps, {
-        phase: "planning",
-        iteration,
-        summary: `candidate validation failed: ${implementationValidation.detail}`,
-      });
+    if (!freshImplementation) {
       continue;
     }
-    state.lastCommit = implementationReport.commitHash;
-    await saveRunState(paths, state);
-    await emitProgress(paths, spec, runId, deps, {
-      phase: "implementing",
-      iteration,
-      summary: "candidate commit validated",
-      candidateCommit: implementationReport.commitHash,
-    });
+    implementationReport = freshImplementation;
     const reviewOutcome = await runReviewApprovalCycle(iteration, understanding.output, implementationReport, null);
     if (reviewOutcome === "continue") {
       continue;
