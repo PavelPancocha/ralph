@@ -2184,6 +2184,122 @@ test("executeSpec keeps invalidation reason persisted after replanning resumes",
   assert.ok(state.threads.supervisor);
 });
 
+test("executeSpec seeds reruns from the previous lastError and escalates the first retry", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "9753197531975319753197531975319753197531";
+  const lastError = "The previous run failed during verification and should not restart from scratch.";
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "failed",
+      currentIteration: 1,
+      runId: "prior-run",
+      worktreePath: expectedWorktreePath,
+      lastCommit: commitHash,
+      lastError,
+      updatedAt: "2026-04-09T09:00:00.000Z",
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Rerun starts from the previous failure context.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed after restarting from the prior error.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness" as const,
+      status: "approved" as const,
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests" as const,
+      status: "approved" as const,
+      summary: "Verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse("The rerun review synthesis is ready."),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "The rerun resolves the prior failure.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully after rerun.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.deepEqual(
+    fakeCodex.threadConfigs.slice(0, 8).map((entry) => [entry.options?.model, entry.options?.modelReasoningEffort]),
+    [
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+      ["gpt-5.4", "xhigh"],
+    ],
+  );
+  const planningPrompts = fakeCodex.prompts.slice(0, 3).map((entry) => entry.prompt);
+  for (const prompt of planningPrompts) {
+    assert.match(prompt, new RegExp(lastError.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.status, "done");
+  assert.equal(state.lastCommit, commitHash);
+  assert.equal(state.lastError, undefined);
+  assert.equal(state.invalidationReason, undefined);
+});
+
 test("executeSpec rejects out-of-plan review lead follow-up requests", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");

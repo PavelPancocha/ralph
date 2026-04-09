@@ -51,6 +51,9 @@ If recheck returns `needs_fix`, the loop continues until `maxIterations` is reac
 
 If recheck returns `invalidate_plan`, Ralph clears planning-helper, supervisor, understander, implementer, reviewer, review-lead, and recheck thread references and starts a fresh stronger planning pass inside the same spec run.
 
+If a spec is rerun after a prior failure, Ralph reuses the stored `lastError` as the restart context so the next planning pass starts from the last known problem instead of a blank slate.
+That retry also escalates the first implementation and review pass to the stronger model tier so the rerun does not fall back to the cheap initial policy.
+
 ## Default Model Policy
 
 Without `--model`, Ralph uses a role-aware default policy:
@@ -143,6 +146,7 @@ It:
 - emits progress events for terminal streaming and `.ralph/runs/.../events.log`
 - loops review/recheck iterations with role-aware model escalation
 - writes the final done report on success
+- seeds reruns from a prior `lastError` when a spec has already failed once, so `--to` retries start from the prior failure context
 
 Dry-run special case:
 

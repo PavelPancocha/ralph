@@ -794,6 +794,7 @@ export async function executeSpec(
   const runId = createRunId();
   state.runId = runId;
   state.updatedAt = new Date().toISOString();
+  const restartFailureContext = state.invalidationReason ?? state.lastError;
 
   if (options.dryRun) {
     const dryRunSourceOutcome = await analyzeDryRunSourceBranch(paths, spec, repoPath);
@@ -816,6 +817,14 @@ export async function executeSpec(
       summary: `would use worktree at ${plannedWorktreePath}`,
     }, false);
     return dryOutcome;
+  }
+
+  // If this spec already failed once, treat the prior failure message as the
+  // next run's restart context so reruns pick up from the last error rather
+  // than re-planning from a blank slate.
+  if (!state.invalidationReason && restartFailureContext) {
+    state.invalidationReason = restartFailureContext;
+    await saveRunState(paths, state);
   }
 
   await ensureCodexHome(paths);
@@ -844,6 +853,7 @@ export async function executeSpec(
   let plannedReviewerRoles = [...defaultReviewerRoles];
   let shouldReplan = true;
   let verificationRun: VerificationRun | undefined;
+  const retryingFromFailure = restartFailureContext !== undefined;
 
   const runPlanningCycle = async (escalated: boolean): Promise<void> => {
     state.status = "planning";
@@ -954,9 +964,15 @@ export async function executeSpec(
       spec,
       state,
       runId,
-      implementerOptions(options.model, worktreePath, additionalDirectories, iteration > 1),
+      implementerOptions(options.model, worktreePath, additionalDirectories, iteration > 1 || retryingFromFailure),
       implementationReportOutputSchema,
-      buildImplementerPrompt(spec, understanding.output, worktreePath, implementationPromptFixes(acceptedFindings), iteration > 1),
+      buildImplementerPrompt(
+        spec,
+        understanding.output,
+        worktreePath,
+        implementationPromptFixes(acceptedFindings),
+        iteration > 1 || retryingFromFailure,
+      ),
     );
     implementationReport = implementation.output;
     const implementationValidation = await implementationCandidateValidator(
@@ -1006,9 +1022,9 @@ export async function executeSpec(
         spec,
         state,
         runId,
-        reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories),
+        reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories, retryingFromFailure),
         reviewerReportOutputSchema,
-        buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath, false),
+        buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath, retryingFromFailure),
       );
       if (reviewerReport.output.reviewer !== reviewer) {
         await failWorkflowState(
@@ -1275,6 +1291,8 @@ export async function executeSpec(
   await saveDoneReport(paths, spec, supervisorFinal.output.summary, implementationReport.commitHash);
   state.status = "done";
   state.lastCommit = implementationReport.commitHash;
+  state.lastError = undefined;
+  state.invalidationReason = undefined;
   await saveRunState(paths, state);
   await emitProgress(paths, spec, runId, deps, {
     phase: "done",
