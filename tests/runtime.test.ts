@@ -15,6 +15,7 @@ import {
   initialRunState,
   listRunStates,
   publishApprovedSpec,
+  renderPullRequestBody,
   validateImplementationCandidate,
 } from "../src/runtime.js";
 import type { ImplementationReport, RuntimePaths, SpecDocument } from "../src/types.js";
@@ -252,6 +253,7 @@ test("publishApprovedSpec pushes the branch and creates a draft PR with the defa
 
   await execFile("git", ["init", "--bare", remoteRepo]);
   await execFile("git", ["remote", "add", "origin", remoteRepo], { cwd: repoRoot });
+  await execFile("git", ["push", "-u", "origin", "dev"], { cwd: repoRoot });
   await fs.writeFile(
     fakeGhPath,
     [
@@ -259,6 +261,15 @@ test("publishApprovedSpec pushes the branch and creates a draft PR with the defa
       "set -euo pipefail",
       "printf '%s\\n' \"$*\" >> \"$RALPH_FAKE_GH_LOG\"",
       "case \"$1 $2\" in",
+      "  \"api repos/demo/demo/labels?per_page=200\")",
+      "    printf '[{\"name\":\"prototype\"}]'",
+      "    ;;",
+      "  \"repo view\")",
+      "    printf '{\"nameWithOwner\":\"demo/demo\"}'",
+      "    ;;",
+      "  \"label create\")",
+      "    printf 'label ok\\n'",
+      "    ;;",
       "  \"pr list\")",
       "    count=0",
       "    if [[ -f \"$RALPH_FAKE_GH_COUNT\" ]]; then count=$(cat \"$RALPH_FAKE_GH_COUNT\"); fi",
@@ -313,7 +324,7 @@ test("publishApprovedSpec pushes the branch and creates a draft PR with the defa
     assert.equal(result.prUrl, "https://example.test/pr/42");
     assert.equal(result.prCreated, true);
     assert.equal(result.draft, true);
-    assert.deepEqual(result.labels, ["Prototype"]);
+    assert.deepEqual(result.labels, ["prototype"]);
 
     const { stdout: pushedBranch } = await execFile("git", ["ls-remote", "--heads", "origin", "feature/example"], {
       cwd: repoRoot,
@@ -321,10 +332,13 @@ test("publishApprovedSpec pushes the branch and creates a draft PR with the defa
     assert.match(pushedBranch, /refs\/heads\/feature\/example/);
 
     const ghLog = await fs.readFile(fakeGhLog, "utf8");
-    assert.match(ghLog, /pr list --head feature\/example --state all --json number,url,isDraft/);
-    assert.match(ghLog, /pr create .*--head feature\/example .*--base dev/);
+    assert.match(ghLog, /api repos\/demo\/demo\/labels\?per_page=200/);
+    assert.match(ghLog, /repo view --json nameWithOwner/);
+    assert.doesNotMatch(ghLog, /label create Prototype --repo demo\/demo --color D4D4D4/);
+    assert.match(ghLog, /pr list --repo demo\/demo --head feature\/example --state all --json number,url,isDraft/);
+    assert.match(ghLog, /pr create .*--repo demo\/demo .*--head feature\/example .*--base dev/);
     assert.match(ghLog, /--draft/);
-    assert.match(ghLog, /--label Prototype/);
+    assert.match(ghLog, /--label prototype/);
   } finally {
     if (originalPath === undefined) {
       delete process.env.PATH;
@@ -342,6 +356,88 @@ test("publishApprovedSpec pushes the branch and creates a draft PR with the defa
       process.env.RALPH_FAKE_GH_COUNT = originalGhCount;
     }
   }
+});
+
+test("renderPullRequestBody fills the Zemtu-style PR template when one exists", () => {
+  const template = `### Summary
+<!-- summary -->
+
+---
+
+### UI?
+- [ ] No UI changes
+- [ ] UI-related (uncomment “Screenshots” below)
+
+
+### Type
+- [ ] UI polish (visual/non-functional)
+- [ ] Bugfix
+- [ ] Feature
+- [ ] Refactor / Cleanup
+- [ ] Performance
+- [ ] Chore (deps/infra/docs)
+
+### Risk / Impact
+- **Blast radius**:
+  - [ ] Low
+  - [ ] Medium
+  - [ ] High
+- **Migrations**:
+  - [ ] Yes
+  - [ ] No
+- **New packages**:
+  - [ ] Yes
+  - [ ] No
+
+### Testing
+- [ ] Automated tests added/updated
+- [ ] Manual verification of happy **and** unhappy paths
+- [ ] Lint/type/format pass locally
+`;
+
+  const body = renderPullRequestBody(
+    template,
+    {
+      specPath: "/tmp/specs/1001-example.md",
+      relFromSpecs: "1001-example.md",
+      relFromWorkspace: "ralph/specs/1001-example.md",
+      specId: "1001-example",
+      title: "1001 - Example",
+      repo: "demo-repo",
+      workdir: "demo-repo",
+      branchInstructions: {
+        sourceBranch: "dev",
+        createBranch: "feature/example",
+        prTarget: "dev",
+      },
+      goal: "Goal",
+      scopeIn: [],
+      boundariesOut: [],
+      constraints: [],
+      dependencies: [],
+      requiredReading: [],
+      acceptanceCriteria: [],
+      commitRequirements: [],
+      verificationCommands: ["pytest billing/tests/test_example.py", "ruff check ."],
+      rawSections: {},
+    },
+    "Converted the targeted Stripe tests to mocked bases and kept the scope test-only.",
+    "1234567890abcdef1234567890abcdef12345678",
+    [
+      "billing/models_plus/tests/tests_meta_payment.py",
+      "billing/stripe/utils/tests/tests_calculator.py",
+    ],
+  );
+
+  assert.match(body, /Converted the targeted Stripe tests to mocked bases/);
+  assert.match(body, /Spec: 1001-example\.md/);
+  assert.match(body, /Commit: 1234567890abcdef1234567890abcdef12345678/);
+  assert.match(body, /### UI\?\n- \[x\] No UI changes/);
+  assert.match(body, /### Type[\s\S]*- \[x\] Refactor \/ Cleanup/);
+  assert.match(body, /### Risk \/ Impact[\s\S]*- \[x\] Low/);
+  assert.match(body, /### Risk \/ Impact[\s\S]*- \[x\] No/);
+  assert.match(body, /### Testing[\s\S]*- \[x\] Automated tests added\/updated/);
+  assert.match(body, /### Testing[\s\S]*- \[x\] Lint\/type\/format pass locally/);
 });
 
 test("ensureCodexHome seeds auth and config from the user Codex home without overwriting local files", async () => {

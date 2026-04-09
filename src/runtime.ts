@@ -428,16 +428,81 @@ async function execTool(
   return execFileAsync(command, args, { cwd, env: { ...process.env } });
 }
 
+async function githubRepoNameWithOwner(repoPath: string): Promise<string> {
+  const { stdout } = await execTool("gh", ["repo", "view", "--json", "nameWithOwner"], repoPath);
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!isRecord(parsed) || typeof parsed.nameWithOwner !== "string") {
+    throw new Error(`Unable to resolve GitHub repo nameWithOwner for ${repoPath}.`);
+  }
+  return parsed.nameWithOwner;
+}
+
+async function remoteBranchExists(repoPath: string, remote: string, branch: string): Promise<boolean> {
+  const { stdout } = await execTool("git", ["-C", repoPath, "ls-remote", "--heads", remote, branch], repoPath);
+  return stdout.trim() !== "";
+}
+
+async function githubRepoLabels(repoPath: string, repoFullName: string): Promise<string[]> {
+  const { stdout } = await execTool("gh", ["api", `repos/${repoFullName}/labels?per_page=200`], repoPath);
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Unable to load GitHub labels for ${repoFullName}.`);
+  }
+  return parsed
+    .map((item) => (isRecord(item) && typeof item.name === "string" ? item.name : undefined))
+    .filter((item): item is string => item !== undefined);
+}
+
+async function ensureGithubLabel(repoPath: string, repoFullName: string, label: string): Promise<void> {
+  try {
+    await execTool(
+      "gh",
+      ["label", "create", label, "--repo", repoFullName, "--color", "D4D4D4", "--description", `Ralph-managed label: ${label}`],
+      repoPath,
+    );
+  } catch (error) {
+    const stderr = error instanceof Error && "stderr" in error ? String((error as { stderr?: unknown }).stderr ?? "") : "";
+    if (/already exists/i.test(stderr)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function resolveGithubLabelNames(repoPath: string, repoFullName: string, labels: string[]): Promise<string[]> {
+  const existing = await githubRepoLabels(repoPath, repoFullName);
+  const resolved: string[] = [];
+  for (const label of labels) {
+    const canonical = existing.find((candidate) => candidate.toLowerCase() === label.toLowerCase());
+    if (canonical) {
+      resolved.push(canonical);
+      continue;
+    }
+    await ensureGithubLabel(repoPath, repoFullName, label);
+    resolved.push(label);
+  }
+  return [...new Set(resolved)];
+}
+
 interface GithubPullRequestSummary {
   number: number;
   url: string;
   isDraft: boolean;
 }
 
-async function listPullRequestsForBranch(repoPath: string, branch: string): Promise<GithubPullRequestSummary[]> {
+const pullRequestTemplateCandidates = [
+  ".github/pull_request_template.md",
+  ".github/PULL_REQUEST_TEMPLATE.md",
+];
+
+async function listPullRequestsForBranch(
+  repoPath: string,
+  repoFullName: string,
+  branch: string,
+): Promise<GithubPullRequestSummary[]> {
   const { stdout } = await execTool(
     "gh",
-    ["pr", "list", "--head", branch, "--state", "all", "--json", "number,url,isDraft"],
+    ["pr", "list", "--repo", repoFullName, "--head", branch, "--state", "all", "--json", "number,url,isDraft"],
     repoPath,
   );
   const parsed = JSON.parse(stdout) as unknown;
@@ -453,13 +518,143 @@ async function listPullRequestsForBranch(repoPath: string, branch: string): Prom
     });
 }
 
-function publicationSummaryBody(spec: SpecDocument, summary: string, candidateCommit: string): string {
-  return [
+async function loadPullRequestTemplate(repoPath: string): Promise<string | undefined> {
+  for (const relativePath of pullRequestTemplateCandidates) {
+    const absolutePath = path.join(repoPath, relativePath);
+    try {
+      return await fs.readFile(absolutePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  const templateDirectory = path.join(repoPath, ".github", "PULL_REQUEST_TEMPLATE");
+  try {
+    const entries = await fs.readdir(templateDirectory);
+    const markdownTemplates = entries
+      .filter((entry) => entry.toLowerCase().endsWith(".md"))
+      .sort((left, right) => left.localeCompare(right));
+    if (markdownTemplates.length === 0) {
+      return undefined;
+    }
+    return await fs.readFile(path.join(templateDirectory, markdownTemplates[0]!), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function replaceMarkdownSection(template: string, heading: string, sectionBody: string): string {
+  const lines = template.split(/\r?\n/);
+  const headingLine = `### ${heading}`;
+  const startIndex = lines.findIndex((line) => line.trim() === headingLine);
+  if (startIndex === -1) {
+    return template;
+  }
+  let endIndex = lines.length;
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    if (lines[index]?.startsWith("### ")) {
+      endIndex = index;
+      break;
+    }
+  }
+  const replacementLines = [headingLine, ...sectionBody.trimEnd().split("\n"), ""];
+  lines.splice(startIndex, endIndex - startIndex, ...replacementLines);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+function inferPublicationType(changedFiles: string[]): "Feature" | "Refactor / Cleanup" | "Chore (deps/infra/docs)" {
+  if (changedFiles.every((file) => /(^|\/)(tests?|__tests__)\//.test(file) || /test/i.test(path.basename(file)))) {
+    return "Refactor / Cleanup";
+  }
+  if (changedFiles.every((file) => /\.(md|txt|yml|yaml|json)$/.test(file))) {
+    return "Chore (deps/infra/docs)";
+  }
+  return "Feature";
+}
+
+export function renderPullRequestBody(
+  template: string | undefined,
+  spec: SpecDocument,
+  summary: string,
+  candidateCommit: string,
+  changedFiles: string[],
+): string {
+  const summaryBlock = [
+    `${summary}`,
+    "",
     `Spec: ${spec.relFromSpecs}`,
     `Commit: ${candidateCommit}`,
-    "",
-    summary,
   ].join("\n");
+
+  if (!template) {
+    return summaryBlock;
+  }
+
+  const hasUiChanges = changedFiles.some((file) => /\.(tsx?|jsx?|css|scss|sass|less|vue|html)$/.test(file));
+  const hasMigrations = changedFiles.some((file) => /(^|\/)migrations\//.test(file));
+  const hasNewPackages = changedFiles.some((file) =>
+    ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "requirements.txt", "pyproject.toml"]
+      .includes(path.basename(file)));
+  const hasAutomatedTestChanges = changedFiles.some((file) =>
+    /(^|\/)(tests?|__tests__)\//.test(file) || /test/i.test(path.basename(file)));
+  const hasLintOrTypeVerification = spec.verificationCommands.some((command) =>
+    /\b(lint|eslint|ruff|mypy|pyright|tsc|typecheck|prettier|format)\b/i.test(command));
+  const publicationType = inferPublicationType(changedFiles);
+  const blastRadius = changedFiles.length <= 3 ? "Low" : changedFiles.length <= 8 ? "Medium" : "High";
+
+  let body = template;
+  body = replaceMarkdownSection(body, "Summary", `${summaryBlock}\n`);
+  body = replaceMarkdownSection(
+    body,
+    "UI?",
+    [
+      `- [${hasUiChanges ? " " : "x"}] No UI changes`,
+      `- [${hasUiChanges ? "x" : " "}] UI-related (uncomment “Screenshots” below)`,
+    ].join("\n"),
+  );
+  body = replaceMarkdownSection(
+    body,
+    "Type",
+    [
+      `- [${publicationType === "Feature" ? "x" : " "}] Feature`,
+      `- [${publicationType === "Refactor / Cleanup" ? "x" : " "}] Refactor / Cleanup`,
+      `- [${publicationType === "Chore (deps/infra/docs)" ? "x" : " "}] Chore (deps/infra/docs)`,
+      "- [ ] UI polish (visual/non-functional)",
+      "- [ ] Bugfix",
+      "- [ ] Performance",
+    ].join("\n"),
+  );
+  body = replaceMarkdownSection(
+    body,
+    "Risk / Impact",
+    [
+      "- **Blast radius**:",
+      `  - [${blastRadius === "Low" ? "x" : " "}] Low`,
+      `  - [${blastRadius === "Medium" ? "x" : " "}] Medium`,
+      `  - [${blastRadius === "High" ? "x" : " "}] High`,
+      "- **Migrations**:",
+      `  - [${hasMigrations ? "x" : " "}] Yes`,
+      `  - [${hasMigrations ? " " : "x"}] No`,
+      "- **New packages**:",
+      `  - [${hasNewPackages ? "x" : " "}] Yes`,
+      `  - [${hasNewPackages ? " " : "x"}] No`,
+    ].join("\n"),
+  );
+  body = replaceMarkdownSection(
+    body,
+    "Testing",
+    [
+      `- [${hasAutomatedTestChanges ? "x" : " "}] Automated tests added/updated`,
+      "- [ ] Manual verification of happy **and** unhappy paths",
+      `- [${hasLintOrTypeVerification ? "x" : " "}] Lint/type/format pass locally`,
+    ].join("\n"),
+  );
+  return body.trimEnd();
 }
 
 export async function publishApprovedSpec(
@@ -472,10 +667,19 @@ export async function publishApprovedSpec(
   const remote = "origin";
   await execTool("git", ["-C", repoPath, "push", "-u", remote, branch], repoPath);
 
+  const repoFullName = await githubRepoNameWithOwner(repoPath);
   const baseBranch = spec.branchInstructions.prTarget ?? spec.branchInstructions.sourceBranch;
   const shouldCreatePr = spec.branchInstructions.createPr ?? true;
   const draft = spec.branchInstructions.draftPr ?? true;
-  const labels = [...new Set(["Prototype", ...(spec.branchInstructions.labels ?? [])])];
+  const labels = await resolveGithubLabelNames(
+    repoPath,
+    repoFullName,
+    [...new Set(["Prototype", ...(spec.branchInstructions.labels ?? [])])],
+  );
+  const template = await loadPullRequestTemplate(repoPath);
+  const changedFiles = await listCandidateChangedFiles(repoPath, candidateCommit, spec.branchInstructions.sourceBranch)
+    .catch(() => []);
+  const body = renderPullRequestBody(template, spec, summary, candidateCommit, changedFiles);
 
   if (!shouldCreatePr) {
     return {
@@ -487,12 +691,18 @@ export async function publishApprovedSpec(
     };
   }
 
-  let existing = (await listPullRequestsForBranch(repoPath, branch))[0];
+  if (!(await remoteBranchExists(repoPath, remote, baseBranch))) {
+    throw new Error(`PR target branch ${baseBranch} does not exist on ${remote}. Push it first or change the spec PR target.`);
+  }
+
+  let existing = (await listPullRequestsForBranch(repoPath, repoFullName, branch))[0];
   let prCreated = false;
   if (!existing) {
     const createArgs = [
       "pr",
       "create",
+      "--repo",
+      repoFullName,
       "--head",
       branch,
       "--base",
@@ -500,7 +710,7 @@ export async function publishApprovedSpec(
       "--title",
       spec.title,
       "--body",
-      publicationSummaryBody(spec, summary, candidateCommit),
+      body,
     ];
     if (draft) {
       createArgs.push("--draft");
@@ -509,7 +719,7 @@ export async function publishApprovedSpec(
       createArgs.push("--label", label);
     }
     await execTool("gh", createArgs, repoPath);
-    existing = (await listPullRequestsForBranch(repoPath, branch))[0];
+    existing = (await listPullRequestsForBranch(repoPath, repoFullName, branch))[0];
     if (!existing) {
       throw new Error(`Pull request creation succeeded but no PR was found for branch ${branch}.`);
     }
@@ -518,13 +728,15 @@ export async function publishApprovedSpec(
     const editArgs = [
       "pr",
       "edit",
+      "--repo",
+      repoFullName,
       String(existing.number),
       "--base",
       baseBranch,
       "--title",
       spec.title,
       "--body",
-      publicationSummaryBody(spec, summary, candidateCommit),
+      body,
     ];
     for (const label of labels) {
       editArgs.push("--add-label", label);

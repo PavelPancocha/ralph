@@ -176,8 +176,10 @@ When a spec is approved, Ralph does not stop at the local commit anymore. It ent
 
 - pushes the feature branch to `origin`
 - opens or updates the PR for that branch
+- uses the target repo's pull request template when one exists and fills the main sections with Ralph's approval summary and inferred metadata
 - defaults the PR to draft mode unless the spec explicitly overrides it
 - always applies the `Prototype` label, plus any extra labels declared in the spec
+- creates any missing GitHub labels before applying them
 - marks the spec `done` only after publication succeeds
 
 `--to <spec>` runs sequentially through the ordered backlog up to the matching target spec and starts from the first spec in that bounded range that is not already done.

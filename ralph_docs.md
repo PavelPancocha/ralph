@@ -248,6 +248,8 @@ Publication defaults:
 - The PR is draft by default unless the spec explicitly says `Open a PR for this spec branch.`
 - Ralph always applies the `Prototype` label.
 - `Apply labels: ...` adds extra labels on top of `Prototype`.
+- If the target repo has a PR template, Ralph fills that template instead of posting a bare summary body.
+- If a requested GitHub label does not exist yet, Ralph creates it before applying it.
 
 The `run` command only picks runnable specs from the backlog. Draft or analysis files that match the filename pattern but do not satisfy that minimum contract are ignored until they are filled in.
 
