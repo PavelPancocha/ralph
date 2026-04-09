@@ -113,6 +113,12 @@ test("parseArgs accepts --to for bounded sequential runs", () => {
   assert.equal(parsed.dryRun, true);
 });
 
+test("parseArgs accepts --resume for checkpointed reruns", () => {
+  const parsed = parseArgs(["run", "--resume"]);
+  assert.equal(parsed.parseError, undefined);
+  assert.equal(parsed.resume, true);
+});
+
 test("parseArgs leaves model unset when --model is omitted so smart role policy can decide", () => {
   const parsed = parseArgs(["run", "1001-demo"]);
   assert.equal(parsed.model, undefined);

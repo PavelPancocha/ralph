@@ -252,6 +252,7 @@ export interface RalphRunOptions {
   model: string | undefined;
   maxIterations: number;
   dryRun: boolean;
+  resume?: boolean;
   specFilters: string[];
 }
 

@@ -25,6 +25,7 @@ export interface ParsedArgs {
   model: string | undefined;
   maxIterations: number;
   dryRun: boolean;
+  resume?: boolean;
   toSpec: string | undefined;
   inspectTarget: string | undefined;
   createSpecTarget: string | undefined;
@@ -74,6 +75,7 @@ export function renderHelpText(): string {
     "Options:",
     "  --dry-run, --dryrun        Preview matching specs without running Codex",
     "  --to <spec>                Run sequentially through the target spec, starting at the first not-done spec",
+    "  --resume                   Resume from the latest feasible checkpoint when possible",
     "  --workspace-root <path>    Override the workspace root",
     "  --model <model>            Force all Ralph-managed roles to one model",
     "  --max-iterations <n>       Limit the internal review/fix loop",
@@ -128,6 +130,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     model: undefined,
     maxIterations: 3,
     dryRun: false,
+    resume: false,
     toSpec: undefined,
     workspaceRoot: undefined,
     inspectTarget: undefined,
@@ -170,6 +173,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
     if (token === "--dry-run" || token === "--dryrun") {
       args.dryRun = true;
+      continue;
+    }
+    if (token === "--resume") {
+      args.resume = true;
       continue;
     }
     if (token === "--to") {
@@ -304,6 +311,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     model: parsed.model,
     maxIterations: parsed.maxIterations,
     dryRun: parsed.dryRun,
+    resume: parsed.resume ?? false,
     specFilters: parsed.specFilters,
   };
   const executeSpecFn = deps.executeSpec ?? executeSpec;
@@ -311,8 +319,8 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
   let failures = 0;
   console.log(
     parsed.model
-      ? `Running ${selected.length} spec(s) with model override=${parsed.model} maxIterations=${parsed.maxIterations}`
-      : `Running ${selected.length} spec(s) with smart role policy maxIterations=${parsed.maxIterations}`,
+      ? `Running ${selected.length} spec(s) with model override=${parsed.model} maxIterations=${parsed.maxIterations}${parsed.resume ? " resume=true" : ""}`
+      : `Running ${selected.length} spec(s) with smart role policy maxIterations=${parsed.maxIterations}${parsed.resume ? " resume=true" : ""}`,
   );
   for (const [index, relSpec] of selected.entries()) {
     const spec = await parseSpecFile(projectRoot, workspaceRoot, relSpec);

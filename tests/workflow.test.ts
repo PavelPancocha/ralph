@@ -309,6 +309,18 @@ function reviewLeadFollowUpResponse(
   });
 }
 
+async function writeArtifactJson(
+  paths: RuntimePaths,
+  specId: string,
+  runId: string,
+  name: string,
+  payload: unknown,
+): Promise<void> {
+  const dir = path.join(paths.artifactsRoot, specId, runId);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, `${name}.json`), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
 test("executeSpec dry-run warns when a stacked parent branch is expected from an earlier spec", async () => {
   const { projectRoot, workspaceRoot, paths } = await createTempProject();
   await writeWorkflowSpec(projectRoot, "1002-stacked-child.md", {
@@ -571,6 +583,169 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   const doneReport = await fs.readFile(path.join(paths.reportsRoot, "done", `${spec.specId}.md`), "utf8");
   assert.match(doneReport, /Spec completed successfully\./);
   assert.match(doneReport, new RegExp(commitHash));
+});
+
+test("executeSpec --resume continues from the latest review checkpoint", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const savedRunId = "saved-run";
+  const commitHash = "1357913579135791357913579135791357913579";
+
+  const supervisorPolicy = JSON.stringify({
+    role: "supervisor",
+    model: "gpt-5.4",
+    workingDirectory: path.resolve(expectedWorktreePath),
+    additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
+      .map((dir) => path.resolve(dir))
+      .sort(),
+    sandboxMode: "read-only",
+    approvalPolicy: "never",
+    reasoningEffort: "xhigh",
+  });
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "reviewing",
+      currentIteration: 1,
+      runId: savedRunId,
+      worktreePath: expectedWorktreePath,
+      lastCommit: commitHash,
+      updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
+      threads: {
+        understander: "saved-understander",
+        implementer: "saved-implementer",
+        supervisor: "saved-supervisor",
+      },
+      threadPolicies: {
+        understander: JSON.stringify({
+          role: "understander",
+          model: "gpt-5.4",
+          workingDirectory: path.resolve(expectedWorktreePath),
+          additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
+            .map((dir) => path.resolve(dir))
+            .sort(),
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          reasoningEffort: "xhigh",
+        }),
+        implementer: JSON.stringify({
+          role: "implementer",
+          model: "gpt-5.4-mini",
+          workingDirectory: path.resolve(expectedWorktreePath),
+          additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
+            .map((dir) => path.resolve(dir))
+            .sort(),
+          sandboxMode: "workspace-write",
+          approvalPolicy: "never",
+          reasoningEffort: "high",
+        }),
+        supervisor: supervisorPolicy,
+      },
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  await writeArtifactJson(paths, spec.specId, savedRunId, "understander-1", {
+    role: "understander",
+    turnId: "understander:saved-run",
+    threadId: "saved-understander",
+    output: {
+      summary: "Cached understanding packet.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Edit README.md", "Run verification"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    },
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+  await writeArtifactJson(paths, spec.specId, savedRunId, "implementer-1", {
+    role: "implementer",
+    turnId: "implementer:saved-run",
+    threadId: "saved-implementer",
+    output: {
+      summary: "Cached implementation report.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    },
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+
+  const correctnessReview = {
+    reviewer: "correctness" as const,
+    status: "approved" as const,
+    summary: "No correctness issues.",
+    findings: [],
+  };
+  const testsReview = {
+    reviewer: "tests" as const,
+    status: "approved" as const,
+    summary: "Verification coverage is sufficient.",
+    findings: [],
+  };
+
+  const fakeCodex = new FakeCodex([
+    JSON.stringify(correctnessReview),
+    JSON.stringify(testsReview),
+    reviewLeadReadyResponse("Resumed review is ready."),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation still matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: false,
+      resume: true,
+      specFilters: [],
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.ok(fakeCodex.prompts.every((item) => !item.prompt.includes("planning helper")));
+  assert.ok(fakeCodex.prompts.every((item) => !item.prompt.includes("You are the implementer agent for Ralph.")));
+  assert.ok(fakeCodex.prompts.some((item) => item.prompt.includes("You are Ralph's review lead.")));
+  assert.equal(
+    fakeCodex.threadConfigs.filter((entry) => entry.method === "resume" || entry.method === "start").length,
+    5,
+  );
+  assert.equal(
+    fakeCodex.threadConfigs.some((entry) => entry.method === "resume" && entry.threadId === "saved-supervisor"),
+    true,
+  );
 });
 
 test("executeSpec always includes correctness and tests reviewers when the supervisor adds extra coverage", async () => {

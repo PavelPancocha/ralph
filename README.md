@@ -65,6 +65,7 @@ Then run it directly from the repo:
 npm run dev -- --help
 npm run dev -- --dry-run
 npm run dev -- --to 1003
+npm run dev -- --resume
 ```
 
 If you want a real `ralph` command on your machine, install this repository as a linked CLI:
@@ -146,6 +147,7 @@ ralph --help
 ralph --dry-run
 ralph --dryrun
 ralph --to 1003
+ralph --resume
 ralph 1001-demo
 ralph status
 ralph inspect 1001-demo.md
@@ -170,6 +172,8 @@ node dist/src/cli.js run --dry-run
 
 `--to <spec>` runs sequentially through the ordered backlog up to the matching target spec and starts from the first spec in that bounded range that is not already done.
 If a spec in that rerun range has already failed once, Ralph seeds the next attempt from the stored `lastError` so the rerun starts from the prior failure context instead of a blank planning pass. The first implementation and review pass on that retry use the stronger model tier instead of the cheap first-pass tier.
+
+`--resume` continues a previously started spec run from the latest feasible checkpoint instead of replaying the whole workflow from scratch. Ralph prefers the most advanced saved stage it can reconstruct from the run state and artifacts, then continues from there with the existing thread history when the saved policy still matches.
 
 `--dry-run` is truly read-only. It does not create worktrees, runtime state, event logs, artifacts, or `codex-home`. It only validates dry-run preconditions and prints what Ralph would do.
 

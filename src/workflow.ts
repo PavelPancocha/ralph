@@ -45,6 +45,7 @@ import {
   loadRunState,
   peekRunState,
   resolveRepoPath,
+  readArtifactJson,
   saveArtifact,
   saveDoneReport,
   saveRunState,
@@ -672,6 +673,132 @@ function clearReviewThreads(state: RunState): void {
   clearRoleThread(state, "review_lead");
 }
 
+type ResumeStage = "planning" | "implementing" | "reviewing" | "rechecking" | "supervisor_final";
+
+interface ResumeCheckpoint {
+  stage: ResumeStage;
+  seedIteration: number;
+  startIteration: number;
+  understanding?: AgentRunArtifact<UnderstandingPacket>;
+  implementation?: AgentRunArtifact<ImplementationReport>;
+  reviewerOutputs?: ReviewerReport[];
+  reviewLead?: AgentRunArtifact<ReviewLeadReport>;
+  verificationRun?: VerificationRun;
+  recheckVerdict?: AgentRunArtifact<RecheckVerdict>;
+  acceptedFindings: ReviewFinding[];
+  invalidationReason?: string;
+}
+
+async function loadAgentArtifact<T>(
+  paths: RuntimePaths,
+  specId: string,
+  runId: string,
+  name: string,
+): Promise<AgentRunArtifact<T> | null> {
+  return readArtifactJson<AgentRunArtifact<T>>(paths, specId, runId, name);
+}
+
+async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, state: RunState): Promise<ResumeCheckpoint | null> {
+  if (!state.runId) {
+    return null;
+  }
+
+  const runId = state.runId;
+  const seedIteration = state.currentIteration > 0 ? state.currentIteration : 1;
+  const understanding = await loadAgentArtifact<UnderstandingPacket>(paths, spec.specId, runId, `understander-${seedIteration}`);
+  const implementation = await loadAgentArtifact<ImplementationReport>(paths, spec.specId, runId, `implementer-${seedIteration}`);
+  const reviewLead = await loadAgentArtifact<ReviewLeadReport>(paths, spec.specId, runId, `review_lead-${seedIteration}`);
+  const verificationRun = await readArtifactJson<VerificationRun>(paths, spec.specId, runId, `verification-${seedIteration}`);
+  const recheckVerdict = await loadAgentArtifact<RecheckVerdict>(paths, spec.specId, runId, `recheck-${seedIteration}`);
+  const reviewerOutputs = (
+    await Promise.all(
+      defaultReviewerRoles.map(async (reviewer) => {
+        const loaded = await loadAgentArtifact<ReviewerReport>(paths, spec.specId, runId, `reviewer_${reviewer}-${seedIteration}`);
+        return loaded?.output;
+      }),
+    )
+  ).filter((item): item is ReviewerReport => item !== undefined);
+
+  if (state.status === "failed" && recheckVerdict?.output.verdict === "needs_fix") {
+    return {
+      stage: "implementing",
+      seedIteration,
+      startIteration: seedIteration + 1,
+      ...(understanding ? { understanding } : {}),
+      acceptedFindings: recheckVerdict.output.acceptedFindings,
+    };
+  }
+
+  if (state.status === "failed" && recheckVerdict?.output.verdict === "invalidate_plan") {
+    return {
+      stage: "planning",
+      seedIteration,
+      startIteration: seedIteration + 1,
+      ...(understanding ? { understanding } : {}),
+      acceptedFindings: [],
+      invalidationReason: recheckVerdict.output.summary,
+    };
+  }
+
+  if (recheckVerdict && recheckVerdict.output.verdict === "approve") {
+    return {
+      stage: "supervisor_final",
+      seedIteration,
+      startIteration: seedIteration,
+      ...(understanding ? { understanding } : {}),
+      ...(implementation ? { implementation } : {}),
+      reviewerOutputs,
+      ...(reviewLead ? { reviewLead } : {}),
+      ...(verificationRun ? { verificationRun } : {}),
+      recheckVerdict,
+      acceptedFindings: recheckVerdict.output.acceptedFindings,
+    };
+  }
+
+  if (reviewLead || reviewerOutputs.length > 0) {
+    return {
+      stage: "rechecking",
+      seedIteration,
+      startIteration: seedIteration,
+      ...(understanding ? { understanding } : {}),
+      ...(implementation ? { implementation } : {}),
+      reviewerOutputs,
+      ...(reviewLead ? { reviewLead } : {}),
+      ...(verificationRun ? { verificationRun } : {}),
+      acceptedFindings: [],
+    };
+  }
+
+  if (implementation) {
+    return {
+      stage: "reviewing",
+      seedIteration,
+      startIteration: seedIteration,
+      ...(understanding ? { understanding } : {}),
+      ...(implementation ? { implementation } : {}),
+      reviewerOutputs: [],
+      acceptedFindings: [],
+    };
+  }
+
+  if (understanding) {
+    return {
+      stage: "implementing",
+      seedIteration,
+      startIteration: seedIteration,
+      understanding,
+      acceptedFindings: [],
+    };
+  }
+
+  return {
+    stage: "planning",
+    seedIteration,
+    startIteration: seedIteration,
+    acceptedFindings: [],
+  };
+}
+
 interface DryRunOutcome {
   outcome: SupervisorOutcome;
   phase: WorkflowProgressEvent["phase"];
@@ -791,6 +918,7 @@ export async function executeSpec(
     };
   }
 
+  const resumeCheckpoint = options.resume ? await inferResumeCheckpoint(paths, spec, state) : null;
   const runId = createRunId();
   state.runId = runId;
   state.updatedAt = new Date().toISOString();
@@ -855,6 +983,25 @@ export async function executeSpec(
   let verificationRun: VerificationRun | undefined;
   const retryingFromFailure = restartFailureContext !== undefined;
 
+  if (resumeCheckpoint) {
+    invalidationReason = resumeCheckpoint.invalidationReason ?? invalidationReason;
+    acceptedFindings = [...resumeCheckpoint.acceptedFindings];
+    understandingPacket = resumeCheckpoint.understanding?.output;
+    implementationReport = resumeCheckpoint.implementation?.output;
+    recheckVerdict = resumeCheckpoint.recheckVerdict?.output;
+    const resumeReviewerOutputs = resumeCheckpoint.reviewerOutputs ?? [];
+    if (resumeReviewerOutputs.length > 0) {
+      plannedReviewerRoles = mergeReviewerRoles(
+        defaultReviewerRoles,
+        resumeReviewerOutputs.map((report) => report.reviewer),
+      );
+    }
+    if (resumeCheckpoint.verificationRun) {
+      verificationRun = resumeCheckpoint.verificationRun;
+    }
+    shouldReplan = resumeCheckpoint.stage === "planning";
+  }
+
   const runPlanningCycle = async (escalated: boolean): Promise<void> => {
     state.status = "planning";
     await saveRunState(paths, state);
@@ -903,9 +1050,434 @@ export async function executeSpec(
     shouldReplan = false;
   };
 
-  for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
+  const runReviewApprovalCycle = async (
+    iteration: number,
+    currentUnderstanding: UnderstandingPacket,
+    currentImplementation: ImplementationReport,
+    checkpoint: ResumeCheckpoint | null,
+  ): Promise<SupervisorOutcome | "continue"> => {
+    state.status = "reviewing";
+    await saveRunState(paths, state);
+
+    const reviewerOutputs: ReviewerReport[] = [...(checkpoint?.reviewerOutputs ?? [])];
+    const reviewerMap = new Map<ReviewerReport["reviewer"], ReviewerReport>(
+      reviewerOutputs.map((report) => [report.reviewer, report]),
+    );
+
+    for (const reviewer of plannedReviewerRoles) {
+      if (reviewerMap.has(reviewer)) {
+        continue;
+      }
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "reviewing",
+        iteration,
+        reviewer,
+        summary: `running ${reviewer} reviewer`,
+      });
+      const reviewerReport = await runStructuredTurn(
+        codex,
+        paths,
+        spec,
+        state,
+        runId,
+        reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories, retryingFromFailure),
+        reviewerReportOutputSchema,
+        buildReviewerPrompt(reviewer, spec, currentUnderstanding, currentImplementation, worktreePath, retryingFromFailure),
+      );
+      if (reviewerReport.output.reviewer !== reviewer) {
+        await failWorkflowState(
+          paths,
+          state,
+          `Reviewer output mismatch for spec ${spec.specId}: expected ${reviewer}, got ${reviewerReport.output.reviewer}`,
+        );
+      }
+      reviewerOutputs.push(reviewerReport.output);
+      reviewerMap.set(reviewer, reviewerReport.output);
+    }
+
+    let reviewLead = checkpoint?.reviewLead;
+    if (!reviewLead || reviewLead.output.status === "needs_targeted_follow_up") {
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "reviewing",
+        iteration,
+        summary: "running review lead",
+      });
+      reviewLead = await runStructuredTurn(
+        codex,
+        paths,
+        spec,
+        state,
+        runId,
+        reviewLeadOptions(options.model, worktreePath, additionalDirectories),
+        reviewLeadReportOutputSchema,
+        buildReviewLeadPrompt(spec, currentUnderstanding, currentImplementation, reviewerOutputs, worktreePath, true),
+      );
+
+      if (reviewLead.output.status === "needs_targeted_follow_up") {
+        const followUpReviewers = reviewLead.output.followUpReviewers.filter((reviewer) => plannedReviewerRoles.includes(reviewer));
+        if (followUpReviewers.length === 0) {
+          await failWorkflowState(
+            paths,
+            state,
+            `Review lead requested follow-up without valid reviewer roles for spec ${spec.specId}`,
+          );
+        }
+        for (const reviewer of followUpReviewers) {
+          await emitProgress(paths, spec, runId, deps, {
+            phase: "reviewing",
+            iteration,
+            reviewer,
+            summary: `rerunning ${reviewer} reviewer at escalated policy`,
+          });
+          const reviewerReport = await runStructuredTurn(
+            codex,
+            paths,
+            spec,
+            state,
+            runId,
+            reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories, true),
+            reviewerReportOutputSchema,
+            buildReviewerPrompt(reviewer, spec, currentUnderstanding, currentImplementation, worktreePath, true),
+          );
+          if (reviewerReport.output.reviewer !== reviewer) {
+            await failWorkflowState(
+              paths,
+              state,
+              `Reviewer output mismatch for spec ${spec.specId}: expected ${reviewer}, got ${reviewerReport.output.reviewer}`,
+            );
+          }
+          reviewerMap.set(reviewer, reviewerReport.output);
+        }
+        await emitProgress(paths, spec, runId, deps, {
+          phase: "reviewing",
+          iteration,
+          summary: "rerunning review lead after targeted follow-up",
+        });
+        reviewLead = await runStructuredTurn(
+          codex,
+          paths,
+          spec,
+          state,
+          runId,
+          reviewLeadOptions(options.model, worktreePath, additionalDirectories),
+          reviewLeadReportOutputSchema,
+          buildReviewLeadPrompt(
+            spec,
+            currentUnderstanding,
+            currentImplementation,
+            [...reviewerMap.values()],
+            worktreePath,
+            false,
+          ),
+        );
+        if (reviewLead.output.status !== "ready_for_recheck") {
+          await failWorkflowState(
+            paths,
+            state,
+            `Review lead requested more than one targeted follow-up round for spec ${spec.specId}`,
+          );
+        }
+      }
+    }
+
+    if (!reviewLead) {
+      throw new Error(`Review lead checkpoint missing after review stage for spec ${spec.specId}`);
+    }
+
+    state.status = "rechecking";
+    await saveRunState(paths, state);
+    try {
+      verificationRun = checkpoint?.verificationRun ?? (await (deps.runVerificationCommands ?? runVerificationCommands)(
+        repoPath,
+        spec.branchInstructions.createBranch,
+        spec.verificationCommands,
+      ));
+    } catch (error) {
+      const message = error instanceof Error ? error.stack ?? error.message : String(error);
+      await failWorkflowState(
+        paths,
+        state,
+        `Host verification failed for spec ${spec.specId}: ${message}`,
+      );
+    }
+    await saveArtifact(paths, spec.specId, runId, `verification-${iteration}`, verificationRun);
+
+    const finalReviewerOutputs = plannedReviewerRoles.map((reviewer) => {
+      const review = reviewerMap.get(reviewer);
+      if (!review) {
+        throw new Error(`Missing review report for ${reviewer} in spec ${spec.specId}`);
+      }
+      return review;
+    });
+
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "rechecking",
+      iteration,
+      summary: "running recheck verdict",
+    });
+    const recheck = await runStructuredTurn(
+      codex,
+      paths,
+      spec,
+      state,
+      runId,
+      recheckOptions(options.model, worktreePath, additionalDirectories),
+      recheckVerdictOutputSchema,
+      buildRecheckPrompt(
+        spec,
+        currentUnderstanding,
+        currentImplementation,
+        finalReviewerOutputs,
+        reviewLead.output.summary,
+        worktreePath,
+        verificationRun,
+      ),
+    );
+    recheckVerdict = recheck.output;
+    acceptedFindings = recheck.output.acceptedFindings;
+
+    if (recheck.output.verdict === "approve") {
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "rechecking",
+        iteration,
+        summary: "running supervisor final decision",
+        candidateCommit: currentImplementation.commitHash,
+      });
+      const supervisorFinal = await runStructuredTurn(
+        codex,
+        paths,
+        spec,
+        state,
+        runId,
+        supervisorOptions(options.model, worktreePath, additionalDirectories),
+        supervisorOutcomeOutputSchema,
+        buildSupervisorFinalPrompt(spec, currentUnderstanding, currentImplementation, recheck.output),
+      );
+
+      if (supervisorFinal.output.status !== "done") {
+        state.status = "failed";
+        state.lastError = supervisorFinal.output.summary;
+        await saveRunState(paths, state);
+        await emitProgress(paths, spec, runId, deps, {
+          phase: "failed",
+          iteration: state.currentIteration,
+          summary: supervisorFinal.output.summary,
+          candidateCommit: currentImplementation.commitHash,
+        });
+        return {
+          status: "failed",
+          summary: supervisorFinal.output.summary,
+          candidateCommit: currentImplementation.commitHash,
+          nextAction: supervisorFinal.output.nextAction,
+        };
+      }
+
+      await saveDoneReport(paths, spec, supervisorFinal.output.summary, currentImplementation.commitHash);
+      state.status = "done";
+      state.lastCommit = currentImplementation.commitHash;
+      state.lastError = undefined;
+      state.invalidationReason = undefined;
+      await saveRunState(paths, state);
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "done",
+        iteration,
+        summary: supervisorFinal.output.summary,
+        candidateCommit: currentImplementation.commitHash,
+      });
+      return {
+        status: "done",
+        summary: supervisorFinal.output.summary,
+        candidateCommit: currentImplementation.commitHash,
+        nextAction: supervisorFinal.output.nextAction,
+      };
+    }
+
+    if (recheck.output.verdict === "invalidate_plan") {
+      invalidationReason = recheck.output.summary;
+      state.invalidationReason = recheck.output.summary;
+      state.lastCommit = undefined;
+      state.status = "planning";
+      acceptedFindings = [];
+      clearPlanningThreads(state);
+      clearRoleThread(state, "supervisor");
+      clearRoleThread(state, "understander");
+      clearRoleThread(state, "implementer");
+      clearReviewThreads(state);
+      clearRoleThread(state, "recheck");
+      shouldReplan = true;
+      state.updatedAt = new Date().toISOString();
+      await saveRunState(paths, state);
+      await emitProgress(paths, spec, runId, deps, {
+        phase: "planning",
+        iteration,
+        summary: `plan invalidated: ${recheck.output.summary}`,
+      });
+      return "continue";
+    }
+
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "planning",
+      iteration,
+      summary: `continuing with fixes: ${recheck.output.summary}`,
+    });
+    return "continue";
+  };
+
+  for (let iteration = resumeCheckpoint?.startIteration ?? 1; iteration <= options.maxIterations; iteration += 1) {
     state.currentIteration = iteration;
     const currentInvalidationReason = invalidationReason;
+
+    if (resumeCheckpoint && iteration === resumeCheckpoint.startIteration && resumeCheckpoint.stage !== "planning") {
+      if (resumeCheckpoint.stage === "supervisor_final") {
+        if (!resumeCheckpoint.understanding || !resumeCheckpoint.implementation || !resumeCheckpoint.recheckVerdict) {
+          throw new Error(`Resume checkpoint for spec ${spec.specId} is missing final-supervisor artifacts.`);
+        }
+        understandingPacket = resumeCheckpoint.understanding.output;
+        implementationReport = resumeCheckpoint.implementation.output;
+        recheckVerdict = resumeCheckpoint.recheckVerdict.output;
+        await emitProgress(paths, spec, runId, deps, {
+          phase: "rechecking",
+          iteration,
+          summary: "running supervisor final decision",
+          candidateCommit: implementationReport.commitHash,
+        });
+        const supervisorFinal = await runStructuredTurn(
+          codex,
+          paths,
+          spec,
+          state,
+          runId,
+          supervisorOptions(options.model, worktreePath, additionalDirectories),
+          supervisorOutcomeOutputSchema,
+          buildSupervisorFinalPrompt(spec, understandingPacket, implementationReport, recheckVerdict),
+        );
+
+        if (supervisorFinal.output.status !== "done") {
+          state.status = "failed";
+          state.lastError = supervisorFinal.output.summary;
+          await saveRunState(paths, state);
+          await emitProgress(paths, spec, runId, deps, {
+            phase: "failed",
+            iteration: state.currentIteration,
+            summary: supervisorFinal.output.summary,
+            candidateCommit: implementationReport.commitHash,
+          });
+          return {
+            status: "failed",
+            summary: supervisorFinal.output.summary,
+            candidateCommit: implementationReport.commitHash,
+            nextAction: supervisorFinal.output.nextAction,
+          };
+        }
+
+        await saveDoneReport(paths, spec, supervisorFinal.output.summary, implementationReport.commitHash);
+        state.status = "done";
+        state.lastCommit = implementationReport.commitHash;
+        state.lastError = undefined;
+        state.invalidationReason = undefined;
+        await saveRunState(paths, state);
+        await emitProgress(paths, spec, runId, deps, {
+          phase: "done",
+          iteration,
+          summary: supervisorFinal.output.summary,
+          candidateCommit: implementationReport.commitHash,
+        });
+        return {
+          status: "done",
+          summary: supervisorFinal.output.summary,
+          candidateCommit: implementationReport.commitHash,
+          nextAction: supervisorFinal.output.nextAction,
+        };
+      }
+
+      if (resumeCheckpoint.stage === "implementing") {
+        if (!resumeCheckpoint.understanding) {
+          throw new Error(`Resume checkpoint for spec ${spec.specId} is missing understanding artifacts.`);
+        }
+        understandingPacket = resumeCheckpoint.understanding.output;
+        const resumeImplementerEscalated = iteration > 1 || retryingFromFailure;
+        state.status = "implementing";
+        await saveRunState(paths, state);
+        await emitProgress(paths, spec, runId, deps, {
+          phase: "implementing",
+          iteration,
+          summary: "running implementer",
+        });
+        const implementation = await runStructuredTurn(
+          codex,
+          paths,
+          spec,
+          state,
+          runId,
+          implementerOptions(options.model, worktreePath, additionalDirectories, resumeImplementerEscalated),
+          implementationReportOutputSchema,
+          buildImplementerPrompt(
+            spec,
+            understandingPacket,
+            worktreePath,
+            implementationPromptFixes(acceptedFindings),
+            resumeImplementerEscalated,
+          ),
+        );
+        implementationReport = implementation.output;
+        const implementationValidation = await implementationCandidateValidator(
+          worktreePath,
+          implementation.output,
+          spec.branchInstructions.sourceBranch,
+        );
+        if (implementationValidation) {
+          acceptedFindings = [...acceptedFindings, implementationValidation];
+          state.lastCommit = undefined;
+          state.lastError = implementationValidation.detail;
+          state.status = "planning";
+          shouldReplan = true;
+          await saveRunState(paths, state);
+          await saveArtifact(paths, spec.specId, runId, `implementation-validation-${iteration}`, {
+            report: implementation.output,
+            finding: implementationValidation,
+          });
+          await emitProgress(paths, spec, runId, deps, {
+            phase: "planning",
+            iteration,
+            summary: `candidate validation failed: ${implementationValidation.detail}`,
+          });
+          continue;
+        }
+        state.lastCommit = implementation.output.commitHash;
+        await saveRunState(paths, state);
+        await emitProgress(paths, spec, runId, deps, {
+          phase: "implementing",
+          iteration,
+          summary: "candidate commit validated",
+          candidateCommit: implementation.output.commitHash,
+        });
+      }
+
+      if (resumeCheckpoint.stage === "reviewing" || resumeCheckpoint.stage === "rechecking") {
+        if (!resumeCheckpoint.understanding || !resumeCheckpoint.implementation) {
+          throw new Error(`Resume checkpoint for spec ${spec.specId} is missing review-stage artifacts.`);
+        }
+        understandingPacket = resumeCheckpoint.understanding.output;
+        implementationReport = resumeCheckpoint.implementation.output;
+      }
+
+      if (implementationReport && understandingPacket) {
+        const resumedOutcome = await runReviewApprovalCycle(
+          iteration,
+          understandingPacket,
+          implementationReport,
+          resumeCheckpoint.stage === "reviewing" || resumeCheckpoint.stage === "rechecking"
+            ? resumeCheckpoint
+          : null,
+        );
+        if (resumedOutcome === "continue") {
+          shouldReplan = true;
+          continue;
+        }
+        return resumedOutcome;
+      }
+    }
+
     if (shouldReplan) {
       await runPlanningCycle(currentInvalidationReason !== undefined);
     }
@@ -1005,202 +1577,11 @@ export async function executeSpec(
       summary: "candidate commit validated",
       candidateCommit: implementation.output.commitHash,
     });
-
-    state.status = "reviewing";
-    await saveRunState(paths, state);
-    const reviewerOutputs: ReviewerReport[] = [];
-    for (const reviewer of plannedReviewerRoles) {
-      await emitProgress(paths, spec, runId, deps, {
-        phase: "reviewing",
-        iteration,
-        reviewer,
-        summary: `running ${reviewer} reviewer`,
-      });
-      const reviewerReport = await runStructuredTurn(
-        codex,
-        paths,
-        spec,
-        state,
-        runId,
-        reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories, retryingFromFailure),
-        reviewerReportOutputSchema,
-        buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath, retryingFromFailure),
-      );
-      if (reviewerReport.output.reviewer !== reviewer) {
-        await failWorkflowState(
-          paths,
-          state,
-          `Reviewer output mismatch for spec ${spec.specId}: expected ${reviewer}, got ${reviewerReport.output.reviewer}`,
-        );
-      }
-      reviewerOutputs.push(reviewerReport.output);
-    }
-
-    await emitProgress(paths, spec, runId, deps, {
-      phase: "reviewing",
-      iteration,
-      summary: "running review lead",
-    });
-    let reviewLead = await runStructuredTurn(
-      codex,
-      paths,
-      spec,
-      state,
-      runId,
-      reviewLeadOptions(options.model, worktreePath, additionalDirectories),
-      reviewLeadReportOutputSchema,
-      buildReviewLeadPrompt(spec, understanding.output, implementation.output, reviewerOutputs, worktreePath, true),
-    );
-    const finalReviewerMap = new Map<ReviewerReport["reviewer"], ReviewerReport>(reviewerOutputs.map((report) => [report.reviewer, report]));
-
-    if (reviewLead.output.status === "needs_targeted_follow_up") {
-      const followUpReviewers = reviewLead.output.followUpReviewers.filter((reviewer) => plannedReviewerRoles.includes(reviewer));
-      if (followUpReviewers.length === 0) {
-        await failWorkflowState(
-          paths,
-          state,
-          `Review lead requested follow-up without valid reviewer roles for spec ${spec.specId}`,
-        );
-      }
-      for (const reviewer of followUpReviewers) {
-        await emitProgress(paths, spec, runId, deps, {
-          phase: "reviewing",
-          iteration,
-          reviewer,
-          summary: `rerunning ${reviewer} reviewer at escalated policy`,
-        });
-        const reviewerReport = await runStructuredTurn(
-          codex,
-          paths,
-          spec,
-          state,
-          runId,
-          reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories, true),
-          reviewerReportOutputSchema,
-          buildReviewerPrompt(reviewer, spec, understanding.output, implementation.output, worktreePath, true),
-        );
-        if (reviewerReport.output.reviewer !== reviewer) {
-          await failWorkflowState(
-            paths,
-            state,
-            `Reviewer output mismatch for spec ${spec.specId}: expected ${reviewer}, got ${reviewerReport.output.reviewer}`,
-          );
-        }
-        finalReviewerMap.set(reviewer, reviewerReport.output);
-      }
-      await emitProgress(paths, spec, runId, deps, {
-        phase: "reviewing",
-        iteration,
-        summary: "rerunning review lead after targeted follow-up",
-      });
-      reviewLead = await runStructuredTurn(
-        codex,
-        paths,
-        spec,
-        state,
-        runId,
-        reviewLeadOptions(options.model, worktreePath, additionalDirectories),
-        reviewLeadReportOutputSchema,
-        buildReviewLeadPrompt(
-          spec,
-          understanding.output,
-          implementation.output,
-          [...finalReviewerMap.values()],
-          worktreePath,
-          false,
-        ),
-      );
-      if (reviewLead.output.status !== "ready_for_recheck") {
-        await failWorkflowState(
-          paths,
-          state,
-          `Review lead requested more than one targeted follow-up round for spec ${spec.specId}`,
-        );
-      }
-    }
-
-    state.status = "rechecking";
-    await saveRunState(paths, state);
-    try {
-      verificationRun = await (deps.runVerificationCommands ?? runVerificationCommands)(
-        repoPath,
-        spec.branchInstructions.createBranch,
-        spec.verificationCommands,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.stack ?? error.message : String(error);
-      await failWorkflowState(
-        paths,
-        state,
-        `Host verification failed for spec ${spec.specId}: ${message}`,
-      );
-    }
-    await saveArtifact(paths, spec.specId, runId, `verification-${iteration}`, verificationRun);
-
-    const finalReviewerOutputs = plannedReviewerRoles.map((reviewer) => {
-      const review = finalReviewerMap.get(reviewer);
-      if (!review) {
-        throw new Error(`Missing review report for ${reviewer} in spec ${spec.specId}`);
-      }
-      return review;
-    });
-
-    await emitProgress(paths, spec, runId, deps, {
-      phase: "rechecking",
-      iteration,
-      summary: "running recheck verdict",
-    });
-    const recheck = await runStructuredTurn(
-      codex,
-      paths,
-      spec,
-      state,
-      runId,
-      recheckOptions(options.model, worktreePath, additionalDirectories),
-      recheckVerdictOutputSchema,
-      buildRecheckPrompt(
-        spec,
-        understanding.output,
-        implementation.output,
-        finalReviewerOutputs,
-        reviewLead.output.summary,
-        worktreePath,
-        verificationRun,
-      ),
-    );
-    recheckVerdict = recheck.output;
-    acceptedFindings = recheck.output.acceptedFindings;
-
-    if (recheck.output.verdict === "approve") {
-      break;
-    }
-    if (recheck.output.verdict === "invalidate_plan") {
-      invalidationReason = recheck.output.summary;
-      state.invalidationReason = recheck.output.summary;
-      state.lastCommit = undefined;
-      state.status = "planning";
-      acceptedFindings = [];
-      clearPlanningThreads(state);
-      clearRoleThread(state, "supervisor");
-      clearRoleThread(state, "understander");
-      clearRoleThread(state, "implementer");
-      clearReviewThreads(state);
-      clearRoleThread(state, "recheck");
-      shouldReplan = true;
-      state.updatedAt = new Date().toISOString();
-      await saveRunState(paths, state);
-      await emitProgress(paths, spec, runId, deps, {
-        phase: "planning",
-        iteration,
-        summary: `plan invalidated: ${recheck.output.summary}`,
-      });
+    const reviewOutcome = await runReviewApprovalCycle(iteration, understanding.output, implementation.output, null);
+    if (reviewOutcome === "continue") {
       continue;
     }
-    await emitProgress(paths, spec, runId, deps, {
-      phase: "planning",
-      iteration,
-      summary: `continuing with fixes: ${recheck.output.summary}`,
-    });
+    return reviewOutcome;
   }
 
   if (!understandingPacket || !implementationReport || !recheckVerdict) {

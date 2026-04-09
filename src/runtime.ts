@@ -232,6 +232,20 @@ export async function saveArtifact(
   return absolute;
 }
 
+export async function readArtifactJson<T>(
+  paths: RuntimePaths,
+  specId: string,
+  runId: string,
+  name: string,
+): Promise<T | null> {
+  const absolute = path.join(paths.artifactsRoot, specId, runId, `${name}.json`);
+  try {
+    return await readJsonFile<T>(absolute);
+  } catch {
+    return null;
+  }
+}
+
 export function runLogDirectory(paths: RuntimePaths, specId: string, runId: string): string {
   return path.join(paths.runsRoot, specId, runId);
 }
