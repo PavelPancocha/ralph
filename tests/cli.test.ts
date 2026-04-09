@@ -528,17 +528,19 @@ test("runCommand skips already done specs for ordinary runs and logs them explic
   assert.doesNotMatch(logOutput, /\[2\/2\] 1002-two ::/);
 });
 
-test("runCommand keeps going after a failed spec outcome and exits 1 after the full pass", async () => {
+test("runCommand stops immediately after a failed spec outcome and exits 1", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-fail-continue-"));
   await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
   await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
   await writeRunnableSpec(tempRoot, "1002-two.md", "1002 - Two");
 
   let logOutput = "";
+  const executedSpecIds: string[] = [];
   const originalLog = console.log;
   const previousCwd = process.cwd();
   console.log = (message?: unknown) => {
-    logOutput += `${String(message)}\n`;
+    logOutput += `${String(message)}
+`;
   };
   process.chdir(tempRoot);
   try {
@@ -556,6 +558,7 @@ test("runCommand keeps going after a failed spec outcome and exits 1 after the f
       },
       {
         executeSpec: async (_paths, _options, spec) => {
+          executedSpecIds.push(spec.specId);
           if (spec.specId === "1001-one") {
             return {
               status: "failed",
@@ -579,10 +582,11 @@ test("runCommand keeps going after a failed spec outcome and exits 1 after the f
     console.log = originalLog;
   }
 
+  assert.deepEqual(executedSpecIds, ["1001-one"]);
   assert.match(logOutput, /\[1\/2\] 1001-one :: 1001 - One/);
   assert.match(logOutput, /\[1\/2\] FAILED: Dry run found invalid branch wiring\./);
-  assert.match(logOutput, /\[2\/2\] 1002-two :: 1002 - Two/);
-  assert.match(logOutput, /\[2\/2\] DONE: Second spec still ran\./);
+  assert.doesNotMatch(logOutput, /\[2\/2\] 1002-two :: 1002 - Two/);
+  assert.doesNotMatch(logOutput, /\[2\/2\] DONE: Second spec still ran\./);
 });
 
 test("linked CLI wrapper resolves the packaged dist entrypoint from a copied bin directory", async () => {

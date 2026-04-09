@@ -410,7 +410,7 @@ npm run dev -- --to 1003
 ```
 
 `--to <spec>` takes the ordered spec list up to the matching target spec and starts from the first spec in that bounded range that is not already done.
-Any already-done specs in the selected run are skipped and printed before execution starts.
+Any already-done specs in the selected run are skipped and printed before execution starts. Ralph stops at the first failed spec instead of continuing through later specs in the batch.
 
 During a real `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/5 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
 

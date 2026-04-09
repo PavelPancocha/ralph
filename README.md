@@ -184,6 +184,7 @@ When a spec is approved, Ralph does not stop at the local commit anymore. It ent
 - marks the spec `done` only after publication succeeds
 
 Ralph skips specs that are already done before execution and logs them explicitly.
+Ralph also stops on the first failed spec instead of continuing, because the backlog is typically dependency-ordered and later specs usually depend on earlier ones succeeding.
 `--to <spec>` runs sequentially through the ordered backlog up to the matching target spec and starts from the first spec in that bounded range that is not already done.
 If a spec in that rerun range has already failed once, Ralph seeds the next attempt from the stored `lastError` so the rerun starts from the prior failure context instead of a blank planning pass. The first implementation and review pass on that retry use the stronger model tier instead of the cheap first-pass tier.
 

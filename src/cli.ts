@@ -374,11 +374,13 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       }
       if (outcome.status === "failed") {
         failures += 1;
+        return 1;
       }
     } catch (error) {
       failures += 1;
       const message = error instanceof Error ? error.stack ?? error.message : String(error);
       console.error(`[${specIndex}/${selected.length}] FAILED: ${message}`);
+      return 1;
     }
   }
 
