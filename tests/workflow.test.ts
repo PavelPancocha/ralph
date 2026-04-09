@@ -579,6 +579,10 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   assert.match(eventLog, /phase=reviewing iteration=1 reviewer=correctness running correctness reviewer/);
   assert.match(eventLog, /phase=reviewing iteration=1 running review lead/);
   assert.match(eventLog, new RegExp(`phase=done iteration=1 commit=${commitHash} Spec completed successfully\\.`));
+  const testsReviewerPrompt = fakeCodex.prompts.find((entry) => entry.prompt.includes("You are Ralph's tests reviewer."));
+  assert.ok(testsReviewerPrompt?.prompt.includes("Tests reviewer execution scope:"));
+  assert.ok(testsReviewerPrompt?.prompt.includes("Run only tests for affected modules derived from changed files."));
+  assert.ok(testsReviewerPrompt?.prompt.includes("Do not run broad/repo-wide suites in the reviewer phase."));
 
   const doneReport = await fs.readFile(path.join(paths.reportsRoot, "done", `${spec.specId}.md`), "utf8");
   assert.match(doneReport, /Spec completed successfully\./);

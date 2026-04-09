@@ -35,6 +35,7 @@ For a runnable spec, Ralph executes this sequence:
    Applies the change in the active worktree and emits an `ImplementationReport`.
 5. `reviewers`
    Review the candidate implementation. `correctness` and `tests` always run; `security` and `performance` are added when the supervisor requests them.
+   The `tests` reviewer runs only affected-module tests derived from changed files and avoids broad/repo-wide suites during reviewer phase.
 6. `review_lead`
    Synthesizes reviewer outputs and may request one targeted stronger re-review for a disputed topic before handing the review set to recheck.
 7. Host verification

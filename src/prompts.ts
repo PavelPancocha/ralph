@@ -92,6 +92,20 @@ function renderVerificationRun(verificationRun: VerificationRun | undefined): st
   ];
 }
 
+function renderAffectedTestModules(changedFiles: string[]): string[] {
+  const moduleTargets = new Set<string>();
+  for (const file of changedFiles) {
+    if (!file.endsWith(".py")) {
+      continue;
+    }
+    if (!file.includes("/tests/")) {
+      continue;
+    }
+    moduleTargets.add(file.replace(/\.py$/u, "").replaceAll("/", "."));
+  }
+  return [...moduleTargets].sort();
+}
+
 export function buildPlanningHelperPrompt(
   spec: SpecDocument,
   worktreePath: string,
@@ -256,6 +270,22 @@ export function buildReviewerPrompt(
   worktreePath: string,
   escalated: boolean,
 ): string {
+  const affectedTestModules = reviewer === "tests" ? renderAffectedTestModules(implementation.changedFiles) : [];
+  const testsScopeBlock = reviewer !== "tests"
+    ? []
+    : [
+      "",
+      "Tests reviewer execution scope:",
+      "- Run only tests for affected modules derived from changed files.",
+      "- Do not run broad/repo-wide suites in the reviewer phase.",
+      ...(affectedTestModules.length > 0
+        ? [
+            "Affected test modules:",
+            ...affectedTestModules.map((item) => `- ${item}`),
+          ]
+        : ["- No direct test modules were detected from changed files; perform static testability review only."]),
+    ];
+
   return [
     `You are Ralph's ${reviewer} reviewer.`,
     "You are independent from the implementer.",
@@ -280,6 +310,7 @@ export function buildReviewerPrompt(
     "",
     "Changed files:",
     ...implementation.changedFiles.map((item) => `- ${item}`),
+    ...testsScopeBlock,
     "",
     "Return either approval or actionable findings.",
   ].join("\n");

@@ -16,7 +16,7 @@ For each spec, Ralph runs a fixed role pipeline:
 2. `supervisor` synthesizes those views into a strategy and optional extra review coverage.
 3. `understander` turns that strategy into the concrete execution packet.
 4. `implementer` makes the change in an isolated worktree and commits it. Ralph then validates the candidate against the full branch diff from `merge-base..HEAD`, not just the last commit.
-5. Topic reviewers always run `correctness` and `tests`, with optional `security` and `performance` when the supervisor asks for them.
+5. Topic reviewers always run `correctness` and `tests`, with optional `security` and `performance` when the supervisor asks for them. The `tests` reviewer is constrained to affected-module tests derived from changed files and avoids broad suite runs.
 6. `review_lead` synthesizes the review set and can request one targeted stronger re-review when a topic is still ambiguous or high risk.
 7. Ralph runs the spec's verification commands on the host against the feature branch, then restores the previous branch and passes the transcript into recheck.
 8. `recheck` decides whether the implementation is approved, needs another fix loop, or invalidates the plan.
