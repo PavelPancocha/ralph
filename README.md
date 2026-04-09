@@ -177,13 +177,14 @@ When a spec is approved, Ralph does not stop at the local commit anymore. It ent
 - pushes the feature branch to `origin`
 - opens or updates the PR for that branch
 - uses the target repo's pull request template when one exists and fills the main sections with Ralph's approval summary and inferred metadata
+- carries forward issue references found in the spec branch commits so the PR keeps the same GitHub issue linkage after squash/merge
 - defaults the PR to draft mode unless the spec explicitly overrides it
 - always applies the `Prototype` label, plus any extra labels declared in the spec
 - creates any missing GitHub labels before applying them
 - marks the spec `done` only after publication succeeds
 
+Ralph skips specs that are already done before execution and logs them explicitly.
 `--to <spec>` runs sequentially through the ordered backlog up to the matching target spec and starts from the first spec in that bounded range that is not already done.
-If earlier specs in that bounded range are already done, Ralph logs them explicitly as skipped before starting the remaining run.
 If a spec in that rerun range has already failed once, Ralph seeds the next attempt from the stored `lastError` so the rerun starts from the prior failure context instead of a blank planning pass. The first implementation and review pass on that retry use the stronger model tier instead of the cheap first-pass tier.
 
 `--resume` continues a previously started spec run from the latest feasible checkpoint instead of replaying the whole workflow from scratch. Ralph prefers the most advanced saved stage it can reconstruct from the run state and artifacts, then continues from there with the existing thread history when the saved policy still matches. It also prints a small checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or had to fall back to a fresh run.

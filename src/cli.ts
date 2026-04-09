@@ -96,6 +96,13 @@ async function looksLikeProjectRoot(rootPath: string): Promise<boolean> {
   return (await pathExists(path.join(rootPath, "package.json"))) && (await pathExists(path.join(rootPath, "specs")));
 }
 
+async function isSpecAlreadyDone(projectRoot: string, paths: ReturnType<typeof buildRuntimePaths>, relSpec: string): Promise<boolean> {
+  const specId = path.basename(relSpec, ".md");
+  const state = await peekRunState(paths, specId);
+  const legacyDonePath = path.join(projectRoot, "specs", "done", relSpec);
+  return state?.status === "done" || (await pathExists(legacyDonePath));
+}
+
 async function resolveProjectRoot(invocationCwd: string): Promise<string> {
   if (await looksLikeProjectRoot(invocationCwd)) {
     return invocationCwd;
@@ -269,8 +276,9 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     ? specPaths.filter((specPath) => parsed.specFilters.some((filter) => specPath.includes(filter)))
     : specPaths;
 
-  let selected = filtered;
+  let selectionPool = filtered;
   let skippedDueToDone: string[] = [];
+  let boundedTargetLabel: string | undefined;
   if (parsed.toSpec) {
     const matchingTargets = filtered.filter((specPath) => specPath.includes(parsed.toSpec as string));
     if (matchingTargets.length === 0) {
@@ -282,27 +290,40 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       return 1;
     }
     const targetPath = matchingTargets[0]!;
+    boundedTargetLabel = path.basename(targetPath, ".md");
     const bounded = filtered.slice(0, filtered.indexOf(targetPath) + 1);
     let firstPendingIndex = bounded.length;
     for (const [index, relSpec] of bounded.entries()) {
-      const specId = path.basename(relSpec, ".md");
-      const state = await peekRunState(paths, specId);
-      const legacyDonePath = path.join(projectRoot, "specs", "done", relSpec);
-      const done = state?.status === "done" || (await pathExists(legacyDonePath));
+      const done = await isSpecAlreadyDone(projectRoot, paths, relSpec);
       if (!done) {
         firstPendingIndex = index;
         break;
       }
     }
-    if (firstPendingIndex === bounded.length) {
-      console.log(`All specs through ${targetPath} are already done.`);
-      return 0;
-    }
     skippedDueToDone = bounded.slice(0, firstPendingIndex);
-    selected = bounded.slice(firstPendingIndex);
+    selectionPool = bounded.slice(firstPendingIndex);
   }
 
+  const selected: string[] = [];
+  for (const relSpec of selectionPool) {
+    if (await isSpecAlreadyDone(projectRoot, paths, relSpec)) {
+      skippedDueToDone.push(relSpec);
+      continue;
+    }
+    selected.push(relSpec);
+  }
+  skippedDueToDone = [...new Set(skippedDueToDone)];
+
   if (selected.length === 0) {
+    if (skippedDueToDone.length > 0) {
+      console.log(`Skipping ${skippedDueToDone.length} already done spec(s):`);
+      for (const skippedSpec of skippedDueToDone) {
+        console.log(`- ${path.basename(skippedSpec, ".md")}`);
+      }
+      console.log("");
+      console.log(boundedTargetLabel ? `All specs through ${boundedTargetLabel} are already done.` : "All matching specs are already done.");
+      return 0;
+    }
     console.error("No specs matched.");
     return 1;
   }
@@ -320,8 +341,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
 
   let failures = 0;
   if (skippedDueToDone.length > 0) {
-    const lastTarget = selected[selected.length - 1]!;
-    console.log(`Skipping ${skippedDueToDone.length} already done spec(s) before ${path.basename(lastTarget, ".md")}:`);
+    console.log(`Skipping ${skippedDueToDone.length} already done spec(s):`);
     for (const skippedSpec of skippedDueToDone) {
       console.log(`- ${path.basename(skippedSpec, ".md")}`);
     }

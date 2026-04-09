@@ -38,6 +38,24 @@ git status --short
   );
 }
 
+async function writeDoneState(paths: ReturnType<typeof buildRuntimePaths>, specId: string): Promise<void> {
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId,
+      specRel: `${specId}.md`,
+      status: "done",
+      currentIteration: 1,
+      updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 test("parseArgs keeps the first positional token as a run filter when the subcommand is omitted", () => {
   const parsed = parseArgs(["1001-demo", "--dry-run", "--max-iterations", "5"]);
 
@@ -406,36 +424,8 @@ test("runCommand with --to starts from the first spec that is not already done",
 
   const paths = buildRuntimePaths(tempRoot, tempRoot);
   await ensureRuntimePaths(paths);
-  await fs.writeFile(
-    path.join(paths.stateRoot, "1001-one.json"),
-    `${JSON.stringify({
-      stateVersion: 2,
-      specId: "1001-one",
-      specRel: "1001-one.md",
-      status: "done",
-      currentIteration: 1,
-      updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
-      threads: {},
-      threadPolicies: {},
-      legacyDoneDetected: false,
-    }, null, 2)}\n`,
-    "utf8",
-  );
-  await fs.writeFile(
-    path.join(paths.stateRoot, "1002-two.json"),
-    `${JSON.stringify({
-      stateVersion: 2,
-      specId: "1002-two",
-      specRel: "1002-two.md",
-      status: "done",
-      currentIteration: 1,
-      updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
-      threads: {},
-      threadPolicies: {},
-      legacyDoneDetected: false,
-    }, null, 2)}\n`,
-    "utf8",
-  );
+  await writeDoneState(paths, "1001-one");
+  await writeDoneState(paths, "1002-two");
 
   const previousCwd = process.cwd();
   const executedSpecIds: string[] = [];
@@ -477,9 +467,65 @@ test("runCommand with --to starts from the first spec that is not already done",
   }
 
   assert.deepEqual(executedSpecIds, ["1003-three", "1004-four"]);
-  assert.match(logOutput, /Skipping 2 already done spec\(s\) before 1004-four:/);
+  assert.match(logOutput, /Skipping 2 already done spec\(s\):/);
   assert.match(logOutput, /- 1001-one/);
   assert.match(logOutput, /- 1002-two/);
+});
+
+test("runCommand skips already done specs for ordinary runs and logs them explicitly", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-skip-done-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+  await writeRunnableSpec(tempRoot, "1002-two.md", "1002 - Two");
+  await writeRunnableSpec(tempRoot, "1003-three.md", "1003 - Three");
+
+  const paths = buildRuntimePaths(tempRoot, tempRoot);
+  await ensureRuntimePaths(paths);
+  await writeDoneState(paths, "1002-two");
+
+  const previousCwd = process.cwd();
+  const executedSpecIds: string[] = [];
+  let logOutput = "";
+  const originalLog = console.log;
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: [],
+        workspaceRoot: tempRoot,
+        model: undefined,
+        maxIterations: 3,
+        dryRun: false,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+        toSpec: undefined,
+      },
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          executedSpecIds.push(spec.specId);
+          return {
+            status: "done",
+            summary: `Completed ${spec.specId}.`,
+            candidateCommit: "1234567890abcdef1234567890abcdef12345678",
+            nextAction: "none",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+    console.log = originalLog;
+  }
+
+  assert.deepEqual(executedSpecIds, ["1001-one", "1003-three"]);
+  assert.match(logOutput, /Skipping 1 already done spec\(s\):/);
+  assert.match(logOutput, /- 1002-two/);
+  assert.doesNotMatch(logOutput, /\[2\/2\] 1002-two ::/);
 });
 
 test("runCommand keeps going after a failed spec outcome and exits 1 after the full pass", async () => {

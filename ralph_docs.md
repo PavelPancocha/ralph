@@ -57,7 +57,7 @@ If recheck returns `invalidate_plan`, Ralph clears planning-helper, supervisor, 
 If a spec is rerun after a prior failure, Ralph reuses the stored `lastError` as the restart context so the next planning pass starts from the last known problem instead of a blank slate.
 That retry also escalates the first implementation and review pass to the stronger model tier so the rerun does not fall back to the cheap initial policy.
 
-When `--to` trims the run to a bounded range, Ralph also logs any already-done specs that were skipped at the front of that range before it starts executing the remaining specs.
+Before execution, Ralph skips any specs that are already done and logs them explicitly.
 
 If `--resume` is used, Ralph skips ahead to the latest feasible checkpoint it can reconstruct from the saved run state and artifacts. It prefers the furthest completed stage, then continues from there instead of replaying earlier completed work. The CLI prints a checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or fell back to a fresh run.
 
@@ -248,6 +248,7 @@ Publication defaults:
 - The PR is draft by default unless the spec explicitly says `Open a PR for this spec branch.`
 - Ralph always applies the `Prototype` label.
 - `Apply labels: ...` adds extra labels on top of `Prototype`.
+- Ralph carries issue-reference lines from the spec branch commits into the PR body so issue linkage survives PR-based merging.
 - If the target repo has a PR template, Ralph fills that template instead of posting a bare summary body.
 - If a requested GitHub label does not exist yet, Ralph creates it before applying it.
 
@@ -409,6 +410,7 @@ npm run dev -- --to 1003
 ```
 
 `--to <spec>` takes the ordered spec list up to the matching target spec and starts from the first spec in that bounded range that is not already done.
+Any already-done specs in the selected run are skipped and printed before execution starts.
 
 During a real `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/5 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
 

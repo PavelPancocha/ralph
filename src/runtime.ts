@@ -577,18 +577,70 @@ function inferPublicationType(changedFiles: string[]): "Feature" | "Refactor / C
   return "Feature";
 }
 
+function issueReferenceRange(baseRef: string, candidateCommit: string): string {
+  return `${baseRef}..${candidateCommit}`;
+}
+
+function extractIssueReferenceLines(commitMessages: string): string[] {
+  const seen = new Set<string>();
+  const references: string[] = [];
+  for (const commitMessage of commitMessages.split("\u0000")) {
+    for (const rawLine of commitMessage.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+      if (!/(?:^|[\s(])(?:[A-Za-z0-9_.-]+\/)?#\d+\b/.test(line)) {
+        continue;
+      }
+      if (!seen.has(line)) {
+        seen.add(line);
+        references.push(line);
+      }
+    }
+  }
+  return references;
+}
+
+async function listCandidateIssueReferences(
+  repoPath: string,
+  candidateCommit: string,
+  sourceBranch: string,
+): Promise<string[]> {
+  let baseRef = sourceBranch;
+  try {
+    const mergeBase = await readGitStdout(repoPath, ["merge-base", sourceBranch, candidateCommit]);
+    if (mergeBase) {
+      baseRef = mergeBase;
+    }
+  } catch {
+    // Fall back to the named source branch range when merge-base cannot be resolved.
+  }
+
+  const { stdout } = await execFileAsync("git", [
+    "-C",
+    repoPath,
+    "log",
+    "--format=%B%x00",
+    issueReferenceRange(baseRef, candidateCommit),
+  ]);
+  return extractIssueReferenceLines(stdout);
+}
+
 export function renderPullRequestBody(
   template: string | undefined,
   spec: SpecDocument,
   summary: string,
   candidateCommit: string,
   changedFiles: string[],
+  issueReferences: string[] = [],
 ): string {
   const summaryBlock = [
     `${summary}`,
     "",
     `Spec: ${spec.relFromSpecs}`,
     `Commit: ${candidateCommit}`,
+    ...(issueReferences.length > 0 ? ["", ...issueReferences] : []),
   ].join("\n");
 
   if (!template) {
@@ -679,7 +731,9 @@ export async function publishApprovedSpec(
   const template = await loadPullRequestTemplate(repoPath);
   const changedFiles = await listCandidateChangedFiles(repoPath, candidateCommit, spec.branchInstructions.sourceBranch)
     .catch(() => []);
-  const body = renderPullRequestBody(template, spec, summary, candidateCommit, changedFiles);
+  const issueReferences = await listCandidateIssueReferences(repoPath, candidateCommit, spec.branchInstructions.sourceBranch)
+    .catch(() => []);
+  const body = renderPullRequestBody(template, spec, summary, candidateCommit, changedFiles, issueReferences);
 
   if (!shouldCreatePr) {
     return {

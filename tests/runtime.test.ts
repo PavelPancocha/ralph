@@ -49,10 +49,10 @@ async function createRuntimeFixture(): Promise<{
   await execFile("git", ["checkout", "-b", "feature/example"], { cwd: repoRoot });
   await fs.writeFile(path.join(repoRoot, "feature.txt"), "feature change\n", "utf8");
   await execFile("git", ["add", "feature.txt"], { cwd: repoRoot });
-  await execFile("git", ["commit", "-m", "feature work"], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "feature work", "-m", "Refs #101"], { cwd: repoRoot });
   await fs.writeFile(path.join(repoRoot, "docs.txt"), "docs change\n", "utf8");
   await execFile("git", ["add", "docs.txt"], { cwd: repoRoot });
-  await execFile("git", ["commit", "-m", "docs work"], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "docs work", "-m", "Closes #202"], { cwd: repoRoot });
   const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
   await execFile("git", ["checkout", "dev"], { cwd: repoRoot });
 
@@ -339,6 +339,8 @@ test("publishApprovedSpec pushes the branch and creates a draft PR with the defa
     assert.match(ghLog, /pr create .*--repo demo\/demo .*--head feature\/example .*--base dev/);
     assert.match(ghLog, /--draft/);
     assert.match(ghLog, /--label prototype/);
+    assert.match(ghLog, /Refs #101/);
+    assert.match(ghLog, /Closes #202/);
   } finally {
     if (originalPath === undefined) {
       delete process.env.PATH;
@@ -427,11 +429,14 @@ test("renderPullRequestBody fills the Zemtu-style PR template when one exists", 
       "billing/models_plus/tests/tests_meta_payment.py",
       "billing/stripe/utils/tests/tests_calculator.py",
     ],
+    ["Refs #101", "Closes #202"],
   );
 
   assert.match(body, /Converted the targeted Stripe tests to mocked bases/);
   assert.match(body, /Spec: 1001-example\.md/);
   assert.match(body, /Commit: 1234567890abcdef1234567890abcdef12345678/);
+  assert.match(body, /Refs #101/);
+  assert.match(body, /Closes #202/);
   assert.match(body, /### UI\?\n- \[x\] No UI changes/);
   assert.match(body, /### Type[\s\S]*- \[x\] Refactor \/ Cleanup/);
   assert.match(body, /### Risk \/ Impact[\s\S]*- \[x\] Low/);
