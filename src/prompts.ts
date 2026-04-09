@@ -243,7 +243,7 @@ export function buildImplementerPrompt(
     "Required output facts:",
     "- Commit your work before finishing.",
     "- Report the exact 40-character commit hash.",
-    "- List changed files.",
+    "- List changed files for the full feature-branch diff (source merge-base..reported commit), not only the latest commit.",
     "- Summarize verification evidence honestly.",
   ].join("\n");
 }

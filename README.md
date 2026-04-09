@@ -115,6 +115,7 @@ npm run dev -- --model gpt-5.4
 
 # Limit internal review/fix iterations
 npm run dev -- --max-iterations 3
+# Default is 5 if not specified
 
 # Inspect parsed spec JSON
 npm run dev -- inspect 1001-demo.md
@@ -132,7 +133,7 @@ npm run dev -- status
 npm run dev -- --help
 ```
 
-`run` is the default command, so the common path does not need the explicit `run` subcommand. `npm run dev -- --dry-run` is equivalent to `npm run dev -- run --dry-run`.
+`run` is the default command, so the common path does not need the explicit `run` subcommand. `npm run dev -- --dry-run` is equivalent to `npm run dev -- run --dry-run`. The default `--max-iterations` value is `5`.
 
 ### Use As A Real CLI
 

@@ -70,7 +70,7 @@ test("parseArgs marks unknown first commands as parse errors", async () => {
 test("parseArgs rejects invalid --max-iterations values", async () => {
   const parsed = parseArgs(["run", "--max-iterations", "nope"]);
   assert.equal(parsed.parseError, "Invalid --max-iterations value: nope");
-  assert.equal(parsed.maxIterations, 3);
+  assert.equal(parsed.maxIterations, 5);
 
   let errorOutput = "";
   const originalError = console.error;
@@ -122,6 +122,7 @@ test("parseArgs accepts --resume for checkpointed reruns", () => {
 test("parseArgs leaves model unset when --model is omitted so smart role policy can decide", () => {
   const parsed = parseArgs(["run", "1001-demo"]);
   assert.equal(parsed.model, undefined);
+  assert.equal(parsed.maxIterations, 5);
 });
 
 test("parseArgs rejects --model when the explicit value is missing", () => {

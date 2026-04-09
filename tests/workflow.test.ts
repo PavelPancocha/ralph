@@ -585,6 +585,113 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   assert.match(doneReport, new RegExp(commitHash));
 });
 
+test("executeSpec normalizes implementer changedFiles to branch-wide diff before validation", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+
+  await execFile("git", ["checkout", "-b", "feature/demo"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "preexisting.txt"), "preexisting branch change\n", "utf8");
+  await execFile("git", ["add", "preexisting.txt"], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "preexisting feature branch change"], { cwd: repoRoot });
+  const { stdout: preexistingCommitStdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+  const preexistingCommit = preexistingCommitStdout.trim();
+  await execFile("git", ["checkout", "dev"], { cwd: repoRoot });
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Use existing branch commit for the candidate.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Validate existing feature branch candidate."],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Reported only this iteration's touched files.",
+      commitHash: preexistingCommit,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: preexistingCommit,
+      nextAction: "none",
+    }),
+  ]);
+
+  let normalizedReportChangedFiles: string[] | undefined;
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    {
+      ...fakeWorkflowDeps(fakeCodex, {
+        runVerificationCommands: async () => ({
+          repoPath: repoRoot,
+          featureBranch: "feature/demo",
+          startingBranch: "dev",
+          startingCommit: "0123456789abcdef0123456789abcdef01234567",
+          restoredBranch: "dev",
+          commands: [
+            {
+              command: "git status --short",
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            },
+          ],
+          summary: "Stubbed verification succeeded.",
+          succeeded: true,
+        }),
+      }),
+      validateImplementationCandidate: async (_worktreePath, report) => {
+        normalizedReportChangedFiles = report.changedFiles;
+        return null;
+      },
+    },
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.deepEqual(normalizedReportChangedFiles, ["preexisting.txt"]);
+  const reviewerPrompt = fakeCodex.prompts.find((entry) => entry.prompt.includes("You are Ralph's correctness reviewer."));
+  assert.ok(reviewerPrompt?.prompt.includes("- preexisting.txt"));
+});
+
 test("executeSpec --resume continues from the latest review checkpoint", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");

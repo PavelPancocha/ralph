@@ -128,7 +128,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     command,
     specFilters: [],
     model: undefined,
-    maxIterations: 3,
+    maxIterations: 5,
     dryRun: false,
     resume: false,
     toSpec: undefined,

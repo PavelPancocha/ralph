@@ -45,6 +45,7 @@ import {
   loadRunState,
   peekRunState,
   resolveRepoPath,
+  listCandidateChangedFiles,
   readArtifactJson,
   saveArtifact,
   saveDoneReport,
@@ -905,6 +906,22 @@ async function failWorkflowState(paths: RuntimePaths, state: RunState, message: 
   throw new Error(message);
 }
 
+async function normalizeImplementationChangedFiles(
+  worktreePath: string,
+  report: ImplementationReport,
+  baseRef?: string,
+): Promise<ImplementationReport> {
+  try {
+    const changedFiles = await listCandidateChangedFiles(worktreePath, report.commitHash, baseRef);
+    return {
+      ...report,
+      changedFiles,
+    };
+  } catch {
+    return report;
+  }
+}
+
 export async function executeSpec(
   paths: RuntimePaths,
   options: RalphRunOptions,
@@ -1430,10 +1447,15 @@ export async function executeSpec(
             resumeImplementerEscalated,
           ),
         );
-        implementationReport = implementation.output;
-        const implementationValidation = await implementationCandidateValidator(
+        implementationReport = await normalizeImplementationChangedFiles(
           worktreePath,
           implementation.output,
+          spec.branchInstructions.sourceBranch,
+        );
+        implementation.output.changedFiles = implementationReport.changedFiles;
+        const implementationValidation = await implementationCandidateValidator(
+          worktreePath,
+          implementationReport,
           spec.branchInstructions.sourceBranch,
         );
         if (implementationValidation) {
@@ -1444,7 +1466,7 @@ export async function executeSpec(
           shouldReplan = true;
           await saveRunState(paths, state);
           await saveArtifact(paths, spec.specId, runId, `implementation-validation-${iteration}`, {
-            report: implementation.output,
+            report: implementationReport,
             finding: implementationValidation,
           });
           await emitProgress(paths, spec, runId, deps, {
@@ -1454,13 +1476,13 @@ export async function executeSpec(
           });
           continue;
         }
-        state.lastCommit = implementation.output.commitHash;
+        state.lastCommit = implementationReport.commitHash;
         await saveRunState(paths, state);
         await emitProgress(paths, spec, runId, deps, {
           phase: "implementing",
           iteration,
           summary: "candidate commit validated",
-          candidateCommit: implementation.output.commitHash,
+          candidateCommit: implementationReport.commitHash,
         });
       }
 
@@ -1469,7 +1491,11 @@ export async function executeSpec(
           throw new Error(`Resume checkpoint for spec ${spec.specId} is missing review-stage artifacts.`);
         }
         understandingPacket = resumeCheckpoint.understanding.output;
-        implementationReport = resumeCheckpoint.implementation.output;
+        implementationReport = await normalizeImplementationChangedFiles(
+          worktreePath,
+          resumeCheckpoint.implementation.output,
+          spec.branchInstructions.sourceBranch,
+        );
       }
 
       if (implementationReport && understandingPacket) {
@@ -1557,10 +1583,15 @@ export async function executeSpec(
         iteration > 1 || retryingFromFailure,
       ),
     );
-    implementationReport = implementation.output;
-    const implementationValidation = await implementationCandidateValidator(
+    implementationReport = await normalizeImplementationChangedFiles(
       worktreePath,
       implementation.output,
+      spec.branchInstructions.sourceBranch,
+    );
+    implementation.output.changedFiles = implementationReport.changedFiles;
+    const implementationValidation = await implementationCandidateValidator(
+      worktreePath,
+      implementationReport,
       spec.branchInstructions.sourceBranch,
     );
     if (implementationValidation) {
@@ -1570,7 +1601,7 @@ export async function executeSpec(
       state.status = "planning";
       await saveRunState(paths, state);
       await saveArtifact(paths, spec.specId, runId, `implementation-validation-${iteration}`, {
-        report: implementation.output,
+        report: implementationReport,
         finding: implementationValidation,
       });
       await emitProgress(paths, spec, runId, deps, {
@@ -1580,15 +1611,15 @@ export async function executeSpec(
       });
       continue;
     }
-    state.lastCommit = implementation.output.commitHash;
+    state.lastCommit = implementationReport.commitHash;
     await saveRunState(paths, state);
     await emitProgress(paths, spec, runId, deps, {
       phase: "implementing",
       iteration,
       summary: "candidate commit validated",
-      candidateCommit: implementation.output.commitHash,
+      candidateCommit: implementationReport.commitHash,
     });
-    const reviewOutcome = await runReviewApprovalCycle(iteration, understanding.output, implementation.output, null);
+    const reviewOutcome = await runReviewApprovalCycle(iteration, understanding.output, implementationReport, null);
     if (reviewOutcome === "continue") {
       continue;
     }

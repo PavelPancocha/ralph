@@ -362,6 +362,21 @@ async function readGitLines(worktreePath: string, args: string[]): Promise<strin
   return output === "" ? [] : output.split(/\r?\n/);
 }
 
+export async function listCandidateChangedFiles(
+  worktreePath: string,
+  commitHash: string,
+  baseRef?: string,
+): Promise<string[]> {
+  const rawFiles = baseRef
+    ? await readGitLines(worktreePath, [
+      "diff",
+      "--name-only",
+      `${await readGitStdout(worktreePath, ["merge-base", commitHash, baseRef])}..${commitHash}`,
+    ])
+    : await readGitLines(worktreePath, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commitHash]);
+  return [...new Set(rawFiles)].sort();
+}
+
 async function readGitBranch(worktreePath: string): Promise<string | undefined> {
   const branch = await readGitStdout(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
   return branch === "HEAD" ? undefined : branch;
@@ -594,17 +609,7 @@ export async function validateImplementationCandidate(
   }
 
   if (commitExists) {
-    const committedFiles = baseRef
-      ? [
-          ...new Set(
-            await readGitLines(worktreePath, [
-              "diff",
-              "--name-only",
-              `${await readGitStdout(worktreePath, ["merge-base", report.commitHash, baseRef])}..${report.commitHash}`,
-            ]),
-          ),
-        ].sort()
-      : [...new Set(await readGitLines(worktreePath, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", report.commitHash]))].sort();
+    const committedFiles = await listCandidateChangedFiles(worktreePath, report.commitHash, baseRef);
     const reportedFiles = [...new Set(report.changedFiles)].sort();
     if (committedFiles.join("\n") !== reportedFiles.join("\n")) {
       problems.push(

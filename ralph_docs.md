@@ -390,7 +390,7 @@ npm run dev -- --to 1003
 
 `--to <spec>` takes the ordered spec list up to the matching target spec and starts from the first spec in that bounded range that is not already done.
 
-During a real `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/3 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
+During a real `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/5 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
 
 `run` is the default command, so `npm run dev -- --dry-run` is equivalent to `npm run dev -- run --dry-run`.
 
@@ -478,7 +478,7 @@ The workflow file is:
 - The CLI exposes `run`, `status`, `inspect`, and `create-spec`. There is no dedicated `resume` command yet because persistent state plus stable worktree paths already provide the base for restart-safe execution.
 - `--to <spec>` is the built-in bounded batch operator flow for sequential backlog execution.
 - `--dry-run` is intentionally non-persistent: no `.ralph/` writes happen during dry-run.
-- The current review loop is capped by `--max-iterations`.
+- The current review loop is capped by `--max-iterations` (default: `5`).
 - Success is determined by structured agent outputs and the recheck verdict, not by heuristics on plain terminal output.
 
 ## Recommended Next Documentation Updates
