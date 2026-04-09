@@ -171,6 +171,8 @@ node dist/src/cli.js run --dry-run
 
 `--dry-run` is truly read-only. It does not create worktrees, runtime state, event logs, artifacts, or `codex-home`. It only validates dry-run preconditions and prints what Ralph would do.
 
+When Ralph creates or reuses a real spec worktree, it prunes stale git worktree registrations first. That keeps interrupted or manually deleted worktrees from blocking the next run.
+
 Without `--model`, Ralph uses a smart role policy by default:
 
 - `gpt-5.4-mini` for planning helpers, first-pass implementation, and first-pass topic reviews
@@ -304,6 +306,8 @@ Important outputs:
   Final completion report for a successful spec.
 - `.ralph/worktrees/<spec-id>/`
   Git worktree used for the spec run.
+
+Before creating or reusing a real worktree, Ralph prunes stale git worktree registrations so missing-but-registered paths do not block the run.
 
 Legacy `specs/done/...` markers are still recognized as a skip signal when present, but new successful runs write done reports under `.ralph/reports/done/`.
 

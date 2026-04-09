@@ -372,6 +372,7 @@ export async function ensureSpecWorktree(
   repoPath: string,
 ): Promise<string> {
   const worktreePath = path.join(paths.worktreesRoot, spec.specId);
+  await execFileAsync("git", ["-C", repoPath, "worktree", "prune", "--expire", "now"]);
   if (await pathExists(worktreePath)) {
     const { stdout } = await execFileAsync("git", ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"]);
     if (stdout.trim() === spec.branchInstructions.createBranch) {

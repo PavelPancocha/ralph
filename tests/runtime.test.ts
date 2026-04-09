@@ -204,6 +204,17 @@ test("ensureSpecWorktree reuses an existing feature branch without resetting it"
   await fs.access(path.join(worktreePath, ".codex", "hooks", "noop.mjs"));
 });
 
+test("ensureSpecWorktree recreates a missing but still registered worktree", async () => {
+  const { repoRoot, paths, spec } = await createRuntimeFixture();
+
+  const worktreePath = await ensureSpecWorktree(paths, spec, repoRoot);
+  await fs.rm(worktreePath, { recursive: true, force: true });
+
+  const recreatedPath = await ensureSpecWorktree(paths, spec, repoRoot);
+  assert.equal(recreatedPath, worktreePath);
+  await fs.access(path.join(worktreePath, ".codex", "hooks", "noop.mjs"));
+});
+
 test("ensureCodexHome seeds auth and config from the user Codex home without overwriting local files", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-codex-home-"));
   const projectRoot = path.join(workspaceRoot, "ralph");

@@ -274,6 +274,8 @@ Each spec gets a stable worktree path:
 
 If the worktree already exists on the expected feature branch, Ralph reuses it. Otherwise it removes the old worktree and recreates it from the source branch declared by the spec.
 
+Before either reuse or recreation, Ralph prunes stale git worktree registrations so a missing-but-registered worktree path does not block the run.
+
 After worktree creation, Ralph copies `codex-support/` into:
 
 ```text
