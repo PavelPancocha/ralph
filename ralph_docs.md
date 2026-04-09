@@ -37,12 +37,14 @@ For a runnable spec, Ralph executes this sequence:
    Review the candidate implementation. `correctness` and `tests` always run; `security` and `performance` are added when the supervisor requests them.
 6. `review_lead`
    Synthesizes reviewer outputs and may request one targeted stronger re-review for a disputed topic before handing the review set to recheck.
-7. `recheck`
+7. Host verification
+   Ralph runs the spec's verification commands on the host checkout of the feature branch, then restores the previous branch and passes the transcript into recheck.
+8. `recheck`
    Accepts or rejects the synthesized review findings and returns one of:
    - `approve`
    - `needs_fix`
    - `invalidate_plan`
-8. `supervisor`
+9. `supervisor`
    Produces the final `SupervisorOutcome`.
 
 If recheck returns `needs_fix`, the loop continues until `maxIterations` is reached.
@@ -283,6 +285,10 @@ After worktree creation, Ralph copies `codex-support/` into:
 ```
 
 That gives every spec run its own local Codex hook/config bundle.
+
+Candidate validation uses the full branch diff from `merge-base..HEAD`, not just the final commit, so multi-commit branches are judged as a branch rather than as one isolated patch commit.
+
+The spec's `Verification (Fast-First)` commands are executed by Ralph itself on the host checkout of the feature branch. The feature branch is checked out only for the duration of the verification commands and the previous branch is restored immediately afterward so the transcript can be handed to recheck without leaving the checkout in a different state.
 
 ## Legacy Compatibility
 

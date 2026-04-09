@@ -9,7 +9,14 @@ import { promises as fs } from "node:fs";
 import { buildRuntimePaths, ensureRuntimePaths, readJsonFile, runEventLogPath } from "../src/runtime.js";
 import { parseSpecFile } from "../src/specs.js";
 import { executeSpec } from "../src/workflow.js";
-import type { CodexThreadConfig, RalphRunOptions, RunState, RuntimePaths, WorkflowProgressEvent } from "../src/types.js";
+import type {
+  CodexThreadConfig,
+  RalphRunOptions,
+  RunState,
+  RuntimePaths,
+  VerificationRun,
+  WorkflowProgressEvent,
+} from "../src/types.js";
 
 const execFile = promisify(execFileCb);
 
@@ -91,11 +98,29 @@ class FakeCodex {
 
 function fakeWorkflowDeps(
   fakeCodex: FakeCodex,
-  overrides: { onProgress?: (event: WorkflowProgressEvent) => void | Promise<void> } = {},
+  overrides: {
+    onProgress?: (event: WorkflowProgressEvent) => void | Promise<void>;
+    runVerificationCommands?: (repoPath: string, featureBranch: string, commands: string[]) => Promise<VerificationRun>;
+  } = {},
 ) {
   return {
     createCodex: () => fakeCodex,
     validateImplementationCandidate: async () => null,
+    runVerificationCommands: async (repoPath: string, featureBranch: string, commands: string[]): Promise<VerificationRun> => ({
+      repoPath,
+      featureBranch,
+      startingBranch: "dev",
+      startingCommit: "0123456789abcdef0123456789abcdef01234567",
+      restoredBranch: "dev",
+      commands: commands.map((command) => ({
+        command,
+        exitCode: 0,
+        stdout: "stubbed verification output\n",
+        stderr: "",
+      })),
+      summary: `Stubbed verification for ${featureBranch}.`,
+      succeeded: true,
+    }),
     ...overrides,
   };
 }
@@ -2309,4 +2334,110 @@ test("executeSpec sends recheck the real reviewer reports plus the review lead s
   assert.ok(recheckPrompt?.prompt.includes(reviewLeadSummary));
   assert.ok(recheckPrompt?.prompt.includes("Raw reviewer report must survive."));
   assert.ok(recheckPrompt?.prompt.includes("Reviewer found missing verification coverage."));
+});
+
+test("executeSpec passes host verification output into the recheck prompt", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "fedcba9876543210fedcba9876543210fedcba98";
+  const hostVerification: VerificationRun = {
+    repoPath: repoRoot,
+    featureBranch: "feature/demo",
+    startingBranch: "dev",
+    startingCommit: "1111111111111111111111111111111111111111",
+    restoredBranch: "dev",
+    commands: [
+      {
+        command: "echo host verification",
+        exitCode: 0,
+        stdout: "host verification\n",
+        stderr: "",
+      },
+    ],
+    summary: "Host verification ran on the main Zemtu checkout.",
+    succeeded: true,
+  };
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, expectedWorktreePath),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Single pass.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["echo host verification"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed one attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["echo host verification"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "changes_requested",
+      summary: "Raw reviewer report must survive.",
+      findings: [
+        {
+          severity: "warning",
+          category: "tests",
+          title: "Missing verification",
+          detail: "Reviewer found missing verification coverage.",
+          action: "Add the missing verification coverage.",
+        },
+      ],
+    }),
+    reviewLeadReadyResponse("Verification synthesis is ready for recheck."),
+    JSON.stringify({
+      verdict: "needs_fix",
+      summary: "Address the accepted reviewer findings.",
+      acceptedFindings: [
+        {
+          severity: "warning",
+          category: "tests",
+          title: "Missing verification",
+          detail: "Reviewer found missing verification coverage.",
+          action: "Add the missing verification coverage.",
+        },
+      ],
+      rejectedFindings: [],
+      fixInstructions: ["Add the missing verification coverage."],
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      runVerificationCommands: async () => hostVerification,
+    }),
+  );
+
+  assert.equal(outcome.status, "failed");
+  const recheckPrompt = fakeCodex.prompts.find((entry) => entry.prompt.includes("You are the understander re-check agent for Ralph."));
+  assert.ok(recheckPrompt?.prompt.includes("Host verification ran on the main Zemtu checkout."));
+  assert.ok(recheckPrompt?.prompt.includes("echo host verification"));
+  assert.ok(recheckPrompt?.prompt.includes("host verification"));
+  assert.ok(recheckPrompt?.prompt.includes("Feature branch: feature/demo"));
 });

@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { promises as fs } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 import type {
@@ -12,6 +12,7 @@ import type {
   RuntimePaths,
   RunState,
   SpecDocument,
+  VerificationRun,
   WorkflowProgressEvent,
 } from "./types.js";
 
@@ -347,6 +348,48 @@ async function readGitLines(worktreePath: string, args: string[]): Promise<strin
   return output === "" ? [] : output.split(/\r?\n/);
 }
 
+async function readGitBranch(worktreePath: string): Promise<string | undefined> {
+  const branch = await readGitStdout(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  return branch === "HEAD" ? undefined : branch;
+}
+
+async function checkoutGitRef(repoPath: string, ref: string): Promise<void> {
+  await execFileAsync("git", ["-C", repoPath, "checkout", "--ignore-other-worktrees", ref]);
+}
+
+async function checkoutDetachedCommit(repoPath: string, commit: string): Promise<void> {
+  await execFileAsync("git", ["-C", repoPath, "checkout", "--detach", commit]);
+}
+
+async function runShellCommand(
+  cwd: string,
+  command: string,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("/bin/bash", ["-lc", command], {
+      cwd,
+      env: { ...process.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      resolve({
+        exitCode: code ?? (signal ? 128 : 1),
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
 async function ignoreWorktreePath(worktreePath: string, pattern: string): Promise<void> {
   const excludePath = path.resolve(worktreePath, await readGitStdout(worktreePath, ["rev-parse", "--git-path", "info/exclude"]));
   const current = await fs.readFile(excludePath, "utf8").catch(() => "");
@@ -364,6 +407,66 @@ export async function installWorktreeCodexSupport(paths: RuntimePaths, worktreeP
   const dest = path.join(worktreePath, ".codex");
   await copyDirectory(source, dest);
   await ignoreWorktreePath(worktreePath, ".codex/");
+}
+
+export async function runVerificationCommands(
+  repoPath: string,
+  featureBranch: string,
+  commands: string[],
+): Promise<VerificationRun> {
+  const startingBranch = await readGitBranch(repoPath);
+  const startingCommit = await readGitStdout(repoPath, ["rev-parse", "HEAD"]);
+  const commandResults: VerificationRun["commands"] = [];
+
+  if (commands.length === 0) {
+    return {
+      repoPath,
+      featureBranch,
+      startingBranch,
+      startingCommit,
+      restoredBranch: startingBranch,
+      commands: commandResults,
+      summary: `No verification commands were declared for ${featureBranch}.`,
+      succeeded: true,
+    };
+  }
+
+  let switchedToFeature = false;
+  try {
+    await checkoutGitRef(repoPath, featureBranch);
+    switchedToFeature = true;
+    for (const command of commands) {
+      const result = await runShellCommand(repoPath, command);
+      commandResults.push({
+        command,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+    }
+  } finally {
+    if (switchedToFeature) {
+      if (startingBranch) {
+        await checkoutGitRef(repoPath, startingBranch);
+      } else {
+        await checkoutDetachedCommit(repoPath, startingCommit);
+      }
+    }
+  }
+
+  const succeeded = commandResults.every((result) => result.exitCode === 0);
+  return {
+    repoPath,
+    featureBranch,
+    startingBranch,
+    startingCommit,
+    restoredBranch: startingBranch,
+    commands: commandResults,
+    summary: succeeded
+      ? `Ran ${commandResults.length} verification command(s) on ${featureBranch}.`
+      : `Ran ${commandResults.length} verification command(s) on ${featureBranch} with failures.`,
+    succeeded,
+  };
 }
 
 export async function ensureSpecWorktree(
@@ -460,6 +563,7 @@ export async function worktreeAdditionalDirectories(worktreePath: string): Promi
 export async function validateImplementationCandidate(
   worktreePath: string,
   report: ImplementationReport,
+  baseRef?: string,
 ): Promise<ReviewFinding | null> {
   const problems: string[] = [];
   let commitExists = false;
@@ -476,7 +580,17 @@ export async function validateImplementationCandidate(
   }
 
   if (commitExists) {
-    const committedFiles = [...new Set(await readGitLines(worktreePath, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", report.commitHash]))].sort();
+    const committedFiles = baseRef
+      ? [
+          ...new Set(
+            await readGitLines(worktreePath, [
+              "diff",
+              "--name-only",
+              `${await readGitStdout(worktreePath, ["merge-base", report.commitHash, baseRef])}..${report.commitHash}`,
+            ]),
+          ),
+        ].sort()
+      : [...new Set(await readGitLines(worktreePath, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", report.commitHash]))].sort();
     const reportedFiles = [...new Set(report.changedFiles)].sort();
     if (committedFiles.join("\n") !== reportedFiles.join("\n")) {
       problems.push(

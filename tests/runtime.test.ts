@@ -25,6 +25,7 @@ async function createRuntimeFixture(): Promise<{
   paths: RuntimePaths;
   spec: SpecDocument;
   featureCommit: string;
+  branchChangedFiles: string[];
 }> {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-runtime-"));
   const projectRoot = path.join(workspaceRoot, "ralph");
@@ -47,6 +48,9 @@ async function createRuntimeFixture(): Promise<{
   await fs.writeFile(path.join(repoRoot, "feature.txt"), "feature change\n", "utf8");
   await execFile("git", ["add", "feature.txt"], { cwd: repoRoot });
   await execFile("git", ["commit", "-m", "feature work"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "docs.txt"), "docs change\n", "utf8");
+  await execFile("git", ["add", "docs.txt"], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "docs work"], { cwd: repoRoot });
   const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
   await execFile("git", ["checkout", "dev"], { cwd: repoRoot });
 
@@ -82,6 +86,7 @@ async function createRuntimeFixture(): Promise<{
     paths,
     spec,
     featureCommit: stdout.trim(),
+    branchChangedFiles: ["docs.txt", "feature.txt"],
   };
 }
 
@@ -215,6 +220,26 @@ test("ensureSpecWorktree recreates a missing but still registered worktree", asy
   await fs.access(path.join(worktreePath, ".codex", "hooks", "noop.mjs"));
 });
 
+test("runVerificationCommands checks out the feature branch in the main repo and restores the original branch", async () => {
+  const { repoRoot, spec } = await createRuntimeFixture();
+  const { runVerificationCommands } = await import("../src/runtime.js");
+
+  const result = await runVerificationCommands(repoRoot, spec.branchInstructions.createBranch, [
+    "git rev-parse --abbrev-ref HEAD",
+    "printf 'host verification\\n'",
+  ]);
+
+  assert.equal(result.featureBranch, spec.branchInstructions.createBranch);
+  assert.equal(result.startingBranch, "dev");
+  assert.equal(result.restoredBranch, "dev");
+  assert.equal(result.succeeded, true);
+  assert.match(result.commands[0]?.stdout ?? "", /feature\/example/);
+  assert.match(result.commands[1]?.stdout ?? "", /host verification/);
+
+  const { stdout: restoredBranch } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
+  assert.equal(restoredBranch.trim(), "dev");
+});
+
 test("ensureCodexHome seeds auth and config from the user Codex home without overwriting local files", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-codex-home-"));
   const projectRoot = path.join(workspaceRoot, "ralph");
@@ -255,7 +280,7 @@ test("ensureCodexHome seeds auth and config from the user Codex home without ove
 });
 
 test("validateImplementationCandidate rejects dirty or mismatched reports and accepts a clean commit", async () => {
-  const { repoRoot, paths, spec, featureCommit } = await createRuntimeFixture();
+  const { repoRoot, paths, spec, featureCommit, branchChangedFiles } = await createRuntimeFixture();
   const worktreePath = await ensureSpecWorktree(paths, spec, repoRoot);
   await fs.writeFile(path.join(worktreePath, "README.md"), "# demo\n\nRalph e2e smoke test.\n", "utf8");
 
@@ -267,9 +292,16 @@ test("validateImplementationCandidate rejects dirty or mismatched reports and ac
     verificationSummary: "README was edited.",
     concerns: [],
   };
-  const invalidFinding = await validateImplementationCandidate(worktreePath, invalidReport);
+  const invalidFinding = await validateImplementationCandidate(
+    worktreePath,
+    invalidReport,
+    spec.branchInstructions.sourceBranch,
+  );
   assert.ok(invalidFinding);
-  assert.match(invalidFinding.detail, /Reported changed files README\.md do not match committed files feature\.txt\./);
+  assert.match(
+    invalidFinding.detail,
+    new RegExp(`Reported changed files README\\.md do not match committed files ${branchChangedFiles.join(", ").replaceAll(".", "\\.")}\\.`, "u"),
+  );
   assert.match(invalidFinding.detail, /Worktree is not clean after the reported commit: M README\.md\./);
 
   await execFile("git", ["-C", worktreePath, "add", "README.md"]);
@@ -280,7 +312,12 @@ test("validateImplementationCandidate rejects dirty or mismatched reports and ac
     ...invalidReport,
     summary: "Committed the README change cleanly.",
     commitHash: validCommit.trim(),
+    changedFiles: ["README.md", ...branchChangedFiles],
   };
-  const validFinding = await validateImplementationCandidate(worktreePath, validReport);
+  const validFinding = await validateImplementationCandidate(
+    worktreePath,
+    validReport,
+    spec.branchInstructions.sourceBranch,
+  );
   assert.equal(validFinding, null);
 });

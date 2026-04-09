@@ -192,6 +192,24 @@ export interface ImplementationReport {
   concerns: string[];
 }
 
+export interface VerificationCommandResult {
+  command: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface VerificationRun {
+  repoPath: string;
+  featureBranch: string;
+  startingBranch: string | undefined;
+  startingCommit: string;
+  restoredBranch: string | undefined;
+  commands: VerificationCommandResult[];
+  summary: string;
+  succeeded: boolean;
+}
+
 export interface ReviewFinding {
   severity: "info" | "warning" | "error";
   category: "correctness" | "tests" | "security" | "performance";

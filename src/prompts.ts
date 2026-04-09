@@ -6,6 +6,7 @@ import type {
   ReviewerReport,
   SpecDocument,
   SupervisorStrategy,
+  VerificationRun,
   UnderstandingPacket,
 } from "./types.js";
 
@@ -57,6 +58,37 @@ function renderPlanningViews(planningViews: PlanningView[]): string[] {
       ...view.suggestedReviewers.map((item) => `  reviewer: ${item}`),
       ...view.verificationHints.map((item) => `  verify: ${item}`),
     ]),
+  ];
+}
+
+function renderVerificationRun(verificationRun: VerificationRun | undefined): string[] {
+  if (!verificationRun) {
+    return ["Host verification:", "(not run)"];
+  }
+
+  const commandBlocks = verificationRun.commands.flatMap((commandResult, index) => {
+    const stdoutLines = commandResult.stdout.trimEnd().split("\n").filter((line) => line.length > 0);
+    const stderrLines = commandResult.stderr.trimEnd().split("\n").filter((line) => line.length > 0);
+    return [
+      `- Command ${index + 1}: ${commandResult.command}`,
+      `  exitCode: ${commandResult.exitCode}`,
+      "  stdout:",
+      ...(stdoutLines.length > 0 ? stdoutLines.map((line) => `    ${line}`) : ["    (empty)"]),
+      "  stderr:",
+      ...(stderrLines.length > 0 ? stderrLines.map((line) => `    ${line}`) : ["    (empty)"]),
+    ];
+  });
+
+  return [
+    "Host verification:",
+    `- Repo path: ${verificationRun.repoPath}`,
+    `- Feature branch: ${verificationRun.featureBranch}`,
+    `- Starting branch: ${verificationRun.startingBranch ?? "(detached)"}`,
+    `- Restored branch: ${verificationRun.restoredBranch ?? "(detached)"}`,
+    `- Summary: ${verificationRun.summary}`,
+    `- Succeeded: ${verificationRun.succeeded ? "yes" : "no"}`,
+    "Transcript:",
+    ...commandBlocks,
   ];
 }
 
@@ -301,6 +333,7 @@ export function buildRecheckPrompt(
   reviewerReports: ReviewerReport[],
   reviewLeadSummary: string,
   worktreePath: string,
+  verificationRun?: VerificationRun,
 ): string {
   const findings = reviewerReports
     .map((report) => [
@@ -328,6 +361,8 @@ export function buildRecheckPrompt(
     "",
     "Review lead summary:",
     reviewLeadSummary,
+    "",
+    ...renderVerificationRun(verificationRun),
     "",
     "Reviewer reports:",
     findings || "(none)",

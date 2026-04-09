@@ -20,6 +20,7 @@ import type {
   SpecDocument,
   SupervisorOutcome,
   SupervisorStrategy,
+  VerificationRun,
   UnderstandingPacket,
   WorkflowProgressEvent,
 } from "./types.js";
@@ -47,6 +48,7 @@ import {
   saveArtifact,
   saveDoneReport,
   saveRunState,
+  runVerificationCommands,
   validateImplementationCandidate,
   worktreeAdditionalDirectories,
 } from "./runtime.js";
@@ -481,7 +483,13 @@ export interface WorkflowDependencies {
   validateImplementationCandidate?: (
     worktreePath: string,
     report: ImplementationReport,
+    baseRef?: string,
   ) => Promise<ReviewFinding | null>;
+  runVerificationCommands?: (
+    repoPath: string,
+    featureBranch: string,
+    commands: string[],
+  ) => Promise<VerificationRun>;
   onProgress?: (event: WorkflowProgressEvent) => void | Promise<void>;
 }
 
@@ -835,6 +843,7 @@ export async function executeSpec(
   let supervisorStrategy: AgentRunArtifact<SupervisorStrategy> | undefined;
   let plannedReviewerRoles = [...defaultReviewerRoles];
   let shouldReplan = true;
+  let verificationRun: VerificationRun | undefined;
 
   const runPlanningCycle = async (escalated: boolean): Promise<void> => {
     state.status = "planning";
@@ -950,7 +959,11 @@ export async function executeSpec(
       buildImplementerPrompt(spec, understanding.output, worktreePath, implementationPromptFixes(acceptedFindings), iteration > 1),
     );
     implementationReport = implementation.output;
-    const implementationValidation = await implementationCandidateValidator(worktreePath, implementation.output);
+    const implementationValidation = await implementationCandidateValidator(
+      worktreePath,
+      implementation.output,
+      spec.branchInstructions.sourceBranch,
+    );
     if (implementationValidation) {
       acceptedFindings = [...acceptedFindings, implementationValidation];
       state.lastCommit = undefined;
@@ -1090,6 +1103,24 @@ export async function executeSpec(
       }
     }
 
+    state.status = "rechecking";
+    await saveRunState(paths, state);
+    try {
+      verificationRun = await (deps.runVerificationCommands ?? runVerificationCommands)(
+        repoPath,
+        spec.branchInstructions.createBranch,
+        spec.verificationCommands,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.stack ?? error.message : String(error);
+      await failWorkflowState(
+        paths,
+        state,
+        `Host verification failed for spec ${spec.specId}: ${message}`,
+      );
+    }
+    await saveArtifact(paths, spec.specId, runId, `verification-${iteration}`, verificationRun);
+
     const finalReviewerOutputs = plannedReviewerRoles.map((reviewer) => {
       const review = finalReviewerMap.get(reviewer);
       if (!review) {
@@ -1098,8 +1129,6 @@ export async function executeSpec(
       return review;
     });
 
-    state.status = "rechecking";
-    await saveRunState(paths, state);
     await emitProgress(paths, spec, runId, deps, {
       phase: "rechecking",
       iteration,
@@ -1120,6 +1149,7 @@ export async function executeSpec(
         finalReviewerOutputs,
         reviewLead.output.summary,
         worktreePath,
+        verificationRun,
       ),
     );
     recheckVerdict = recheck.output;
