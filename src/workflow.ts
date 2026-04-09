@@ -38,6 +38,7 @@ import {
   createRunId,
   ensureCodexHome,
   ensureSpecWorktree,
+  gitRefExists,
   initialRunState,
   legacyDoneExists,
   loadRunState,
@@ -48,6 +49,7 @@ import {
   validateImplementationCandidate,
   worktreeAdditionalDirectories,
 } from "./runtime.js";
+import { discoverSpecPaths, parseSpecFile } from "./specs.js";
 
 const supervisorStrategySchema = z.object({
   summary: z.string(),
@@ -658,6 +660,97 @@ function clearReviewThreads(state: RunState): void {
   clearRoleThread(state, "review_lead");
 }
 
+interface DryRunOutcome {
+  outcome: SupervisorOutcome;
+  phase: WorkflowProgressEvent["phase"];
+  artifact: Record<string, unknown>;
+}
+
+async function analyzeDryRunSourceBranch(
+  paths: RuntimePaths,
+  spec: SpecDocument,
+  repoPath: string,
+): Promise<DryRunOutcome | null> {
+  if (await gitRefExists(repoPath, `refs/heads/${spec.branchInstructions.createBranch}`)) {
+    return null;
+  }
+
+  if (await gitRefExists(repoPath, spec.branchInstructions.sourceBranch)) {
+    return null;
+  }
+
+  const specPaths = await discoverSpecPaths(path.join(paths.projectRoot, "specs"));
+  const parsedSpecs = await Promise.all(
+    specPaths.map((relFromSpecs) => parseSpecFile(paths.projectRoot, paths.workspaceRoot, relFromSpecs)),
+  );
+  const currentIndex = parsedSpecs.findIndex((candidate) => candidate.relFromSpecs === spec.relFromSpecs);
+  const sourceProducer = parsedSpecs.find(
+    (candidate) =>
+      candidate.relFromSpecs !== spec.relFromSpecs
+      && candidate.branchInstructions.createBranch === spec.branchInstructions.sourceBranch,
+  );
+
+  if (!sourceProducer) {
+    return {
+      phase: "failed",
+      outcome: {
+        status: "failed",
+        summary: `Dry run found missing source branch ${spec.branchInstructions.sourceBranch}: it is not a Git ref in ${repoPath}, and no spec in this project creates it.`,
+        candidateCommit: undefined,
+        nextAction: "Create or rename the external base branch, or fix the spec's Branch Instructions.",
+      },
+      artifact: {
+        classification: "missing-external-root-branch",
+        sourceBranch: spec.branchInstructions.sourceBranch,
+        createBranch: spec.branchInstructions.createBranch,
+        repoPath,
+        spec: spec.relFromSpecs,
+      },
+    };
+  }
+
+  const sourceProducerIndex = parsedSpecs.findIndex((candidate) => candidate.relFromSpecs === sourceProducer.relFromSpecs);
+  if (sourceProducerIndex !== -1 && currentIndex !== -1 && sourceProducerIndex < currentIndex) {
+    return {
+      phase: "dry-run",
+      outcome: {
+        status: "needs_more_work",
+        summary: `Dry run skipped worktree setup: source branch ${spec.branchInstructions.sourceBranch} should be created earlier by ${sourceProducer.specId}, so it does not exist yet in a clean dry-run traversal.`,
+        candidateCommit: undefined,
+        nextAction: `Run the stack normally or materialize ${sourceProducer.branchInstructions.createBranch} before rerunning ${spec.specId}.`,
+      },
+      artifact: {
+        classification: "expected-earlier-parent-spec",
+        sourceBranch: spec.branchInstructions.sourceBranch,
+        createBranch: spec.branchInstructions.createBranch,
+        producerSpecId: sourceProducer.specId,
+        producerSpecPath: sourceProducer.relFromSpecs,
+        repoPath,
+        spec: spec.relFromSpecs,
+      },
+    };
+  }
+
+  return {
+    phase: "failed",
+    outcome: {
+      status: "failed",
+      summary: `Dry run found invalid branch wiring: source branch ${spec.branchInstructions.sourceBranch} is created by later spec ${sourceProducer.specId}, but Ralph executes specs in ascending order.`,
+      candidateCommit: undefined,
+      nextAction: `Fix the spec graph so ${spec.specId} starts from an earlier branch or renumber the stack.`,
+    },
+    artifact: {
+      classification: "future-parent-spec",
+      sourceBranch: spec.branchInstructions.sourceBranch,
+      createBranch: spec.branchInstructions.createBranch,
+      producerSpecId: sourceProducer.specId,
+      producerSpecPath: sourceProducer.relFromSpecs,
+      repoPath,
+      spec: spec.relFromSpecs,
+    },
+  };
+}
+
 async function failWorkflowState(paths: RuntimePaths, state: RunState, message: string): Promise<never> {
   state.status = "failed";
   state.lastError = message;
@@ -689,6 +782,24 @@ export async function executeSpec(
   const runId = createRunId();
   state.runId = runId;
   state.updatedAt = new Date().toISOString();
+  await saveRunState(paths, state);
+
+  if (options.dryRun) {
+    const dryRunSourceOutcome = await analyzeDryRunSourceBranch(paths, spec, repoPath);
+    if (dryRunSourceOutcome) {
+      await saveArtifact(paths, spec.specId, runId, "dry-run", {
+        spec,
+        repoPath,
+        ...dryRunSourceOutcome.artifact,
+      });
+      await emitProgress(paths, spec, runId, deps, {
+        phase: dryRunSourceOutcome.phase,
+        summary: dryRunSourceOutcome.outcome.summary,
+      });
+      return dryRunSourceOutcome.outcome;
+    }
+  }
+
   const worktreePath = await ensureSpecWorktree(paths, spec, repoPath);
   const additionalDirectories = await worktreeAdditionalDirectories(worktreePath);
   state.worktreePath = worktreePath;

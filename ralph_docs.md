@@ -312,6 +312,7 @@ npm install
 Then run it directly:
 
 ```bash
+npm run dev -- --help
 npm run dev -- --dry-run
 ```
 
@@ -326,6 +327,7 @@ npm link
 Then use:
 
 ```bash
+ralph --help
 ralph --dry-run
 ```
 
@@ -349,6 +351,7 @@ npm run dev -- 1001-demo
 
 ```bash
 npm run dev -- --dry-run
+npm run dev -- --dryrun
 ```
 
 During `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/3 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
@@ -359,6 +362,12 @@ During `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning i
 
 ```bash
 npm run dev -- status
+```
+
+### Help
+
+```bash
+npm run dev -- --help
 ```
 
 ### Inspect parsed spec output
@@ -389,6 +398,7 @@ npm run build
 npm link
 
 ralph --dry-run
+ralph --dryrun
 ralph 1001-demo
 ralph status
 ralph inspect 1001-demo.md

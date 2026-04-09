@@ -3,8 +3,12 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 
 import { parseArgs, runCommand } from "../src/cli.js";
+
+const execFile = promisify(execFileCb);
 
 async function writeRunnableSpec(projectRoot: string, relativePath: string, title: string): Promise<void> {
   const absolute = path.join(projectRoot, "specs", relativePath);
@@ -94,6 +98,13 @@ test("parseArgs accepts spec-like shorthand filters and flag-only run invocation
   assert.equal(flagOnly.model, undefined);
 });
 
+test("parseArgs accepts --dryrun as a dry-run alias", () => {
+  const parsed = parseArgs(["--dryrun"]);
+  assert.equal(parsed.parseError, undefined);
+  assert.equal(parsed.command, "run");
+  assert.equal(parsed.dryRun, true);
+});
+
 test("parseArgs leaves model unset when --model is omitted so smart role policy can decide", () => {
   const parsed = parseArgs(["run", "1001-demo"]);
   assert.equal(parsed.model, undefined);
@@ -102,6 +113,30 @@ test("parseArgs leaves model unset when --model is omitted so smart role policy 
 test("parseArgs rejects --model when the explicit value is missing", () => {
   assert.equal(parseArgs(["run", "--model"]).parseError, "Missing --model value");
   assert.equal(parseArgs(["run", "--model", "--dry-run"]).parseError, "Missing --model value");
+});
+
+test("parseArgs rejects unknown long options instead of treating them as spec filters", () => {
+  const parsed = parseArgs(["run", "--dryrn"]);
+  assert.equal(parsed.parseError, "Unknown option: --dryrn");
+  assert.deepEqual(parsed.specFilters, []);
+});
+
+test("runCommand prints help for --help", async () => {
+  let logOutput = "";
+  const originalLog = console.log;
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  try {
+    const exitCode = await runCommand(parseArgs(["--help"]));
+    assert.equal(exitCode, 0);
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.match(logOutput, /Usage:\s+ralph \[run\] \[spec-filter\.\.\.\] \[options\]/);
+  assert.match(logOutput, /--dry-run, --dryrun/);
+  assert.match(logOutput, /Commands:\s+run, status, inspect, create-spec/);
 });
 
 test("create-spec scaffolds a spec with required and recommended sections", async () => {
@@ -254,4 +289,123 @@ test("runCommand logs the smart role policy banner when model is omitted", async
   }
 
   assert.match(logOutput, /Running 1 spec\(s\) with smart role policy maxIterations=3/);
+});
+
+test("runCommand auto-detects a nested ralph project root when invoked from the workspace root", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-workspace-"));
+  const projectRoot = path.join(tempRoot, "ralph");
+  await fs.mkdir(path.join(projectRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, "package.json"), '{"name":"ralph","type":"module"}\n', "utf8");
+  await fs.writeFile(path.join(projectRoot, "src", "cli.ts"), "export {};\n", "utf8");
+  await fs.mkdir(path.join(projectRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(projectRoot, "1001-one.md", "1001 - One");
+
+  const previousCwd = process.cwd();
+  let executedSpecId: string | undefined;
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: [],
+        workspaceRoot: undefined,
+        model: undefined,
+        maxIterations: 3,
+        dryRun: true,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+      },
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          executedSpecId = spec.specId;
+          return {
+            status: "needs_more_work",
+            summary: "Dry run prepared worktree.",
+            candidateCommit: undefined,
+            nextAction: "re-run",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+  }
+
+  assert.equal(executedSpecId, "1001-one");
+});
+
+test("runCommand keeps going after a failed spec outcome and exits 1 after the full pass", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-fail-continue-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+  await writeRunnableSpec(tempRoot, "1002-two.md", "1002 - Two");
+
+  let logOutput = "";
+  const originalLog = console.log;
+  const previousCwd = process.cwd();
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: [],
+        workspaceRoot: tempRoot,
+        model: undefined,
+        maxIterations: 3,
+        dryRun: true,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+      },
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          if (spec.specId === "1001-one") {
+            return {
+              status: "failed",
+              summary: "Dry run found invalid branch wiring.",
+              candidateCommit: undefined,
+              nextAction: "Fix the spec graph.",
+            };
+          }
+          return {
+            status: "done",
+            summary: "Second spec still ran.",
+            candidateCommit: "1234567890abcdef1234567890abcdef12345678",
+            nextAction: "none",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 1);
+  } finally {
+    process.chdir(previousCwd);
+    console.log = originalLog;
+  }
+
+  assert.match(logOutput, /\[1\/2\] 1001-one :: 1001 - One/);
+  assert.match(logOutput, /\[1\/2\] FAILED: Dry run found invalid branch wiring\./);
+  assert.match(logOutput, /\[2\/2\] 1002-two :: 1002 - Two/);
+  assert.match(logOutput, /\[2\/2\] DONE: Second spec still ran\./);
+});
+
+test("linked CLI wrapper resolves the packaged dist entrypoint from a copied bin directory", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-bin-wrapper-"));
+  const installRoot = path.join(tempRoot, "image", "packages", "ralph");
+  const binRoot = path.join(installRoot, "bin");
+  const nodeModulesRoot = path.join(installRoot, "lib", "node_modules");
+  const packageLink = path.join(nodeModulesRoot, "ralph");
+  await fs.mkdir(binRoot, { recursive: true });
+  await fs.mkdir(nodeModulesRoot, { recursive: true });
+  await fs.copyFile(path.join(process.cwd(), "bin", "ralph.js"), path.join(binRoot, "ralph.js"));
+  await fs.symlink(process.cwd(), packageLink, "dir");
+
+  const { stdout, stderr } = await execFile("node", [path.join(binRoot, "ralph.js"), "--help"], {
+    cwd: tempRoot,
+  });
+
+  assert.equal(stderr, "");
+  assert.equal(stdout, "");
 });

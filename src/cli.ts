@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { access } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -10,7 +11,7 @@ import { buildRuntimePaths, defaultWorkspaceRoot, ensureRuntimePaths, listRunSta
 import { createSampleSpecFile, discoverSpecPaths, parseSpecFile } from "./specs.js";
 
 export interface ParsedArgs {
-  command: "run" | "status" | "inspect" | "create-spec";
+  command: "run" | "status" | "inspect" | "create-spec" | "help";
   specFilters: string[];
   workspaceRoot: string | undefined;
   model: string | undefined;
@@ -49,16 +50,67 @@ function looksLikeSpecFilter(token: string): boolean {
   return /(^|\/)\d{4,}/.test(token) || token.endsWith(".md");
 }
 
+function isHelpToken(token: string | undefined): boolean {
+  return token === "--help" || token === "-h" || token === "help";
+}
+
+export function renderHelpText(): string {
+  return [
+    "Usage: ralph [run] [spec-filter...] [options]",
+    "       ralph status",
+    "       ralph inspect <spec-path>",
+    "       ralph create-spec <spec-path>",
+    "",
+    "Commands: run, status, inspect, create-spec",
+    "Options:",
+    "  --dry-run, --dryrun        Preview matching specs without running Codex",
+    "  --workspace-root <path>    Override the workspace root",
+    "  --model <model>            Force all Ralph-managed roles to one model",
+    "  --max-iterations <n>       Limit the internal review/fix loop",
+    "  -h, --help                 Show this help",
+  ].join("\n");
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function looksLikeProjectRoot(rootPath: string): Promise<boolean> {
+  return (await pathExists(path.join(rootPath, "package.json"))) && (await pathExists(path.join(rootPath, "specs")));
+}
+
+async function resolveProjectRoot(invocationCwd: string): Promise<string> {
+  if (await looksLikeProjectRoot(invocationCwd)) {
+    return invocationCwd;
+  }
+
+  const nestedProjectRoot = path.join(invocationCwd, "ralph");
+  if (await looksLikeProjectRoot(nestedProjectRoot)) {
+    return nestedProjectRoot;
+  }
+
+  return invocationCwd;
+}
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const [firstToken, ...remainingTokens] = argv;
+  const helpRequested = argv.some((token) => isHelpToken(token));
   const hasExplicitCommand =
     firstToken === "run" || firstToken === "status" || firstToken === "inspect" || firstToken === "create-spec";
   let parseError =
-    firstToken && !hasExplicitCommand && !firstToken.startsWith("--") && !looksLikeSpecFilter(firstToken)
+    firstToken && !helpRequested && !hasExplicitCommand && !firstToken.startsWith("--") && !looksLikeSpecFilter(firstToken)
       ? `Unknown command: ${firstToken}`
       : undefined;
-  const command: ParsedArgs["command"] =
-    firstToken === "status" || firstToken === "inspect" || firstToken === "create-spec" ? firstToken : "run";
+  const command: ParsedArgs["command"] = helpRequested
+    ? "help"
+    : firstToken === "status" || firstToken === "inspect" || firstToken === "create-spec"
+      ? firstToken
+      : "run";
   const rest = hasExplicitCommand ? remainingTokens : parseError ? remainingTokens : argv;
   const args: ParsedArgs = {
     command,
@@ -75,6 +127,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
     if (!token) {
+      continue;
+    }
+    if (isHelpToken(token)) {
       continue;
     }
     if (token === "--workspace-root") {
@@ -102,7 +157,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       index += 1;
       continue;
     }
-    if (token === "--dry-run") {
+    if (token === "--dry-run" || token === "--dryrun") {
       args.dryRun = true;
       continue;
     }
@@ -112,6 +167,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
     if (args.command === "create-spec" && !args.createSpecTarget) {
       args.createSpecTarget = token;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      parseError ??= `Unknown option: ${token}`;
       continue;
     }
     args.specFilters.push(token);
@@ -125,11 +184,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
 export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies = {}): Promise<number> {
   if (parsed.parseError) {
-    console.error(`${parsed.parseError}. Use one of: run, status, inspect, create-spec.`);
+    console.error(`${parsed.parseError}. Use --help for usage.`);
     return 1;
   }
 
-  const projectRoot = process.cwd();
+  if (parsed.command === "help") {
+    console.log(renderHelpText());
+    return 0;
+  }
+
+  const projectRoot = await resolveProjectRoot(process.cwd());
   const workspaceRoot = parsed.workspaceRoot
     ? path.resolve(parsed.workspaceRoot)
     : defaultWorkspaceRoot(projectRoot);

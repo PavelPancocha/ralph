@@ -304,13 +304,17 @@ async function pathExists(absolute: string): Promise<boolean> {
   }
 }
 
-async function localBranchExists(repoPath: string, branch: string): Promise<boolean> {
+export async function gitRefExists(repoPath: string, ref: string): Promise<boolean> {
   try {
-    await execFileAsync("git", ["-C", repoPath, "rev-parse", "--verify", `refs/heads/${branch}`]);
+    await execFileAsync("git", ["-C", repoPath, "rev-parse", "--verify", `${ref}^{commit}`]);
     return true;
   } catch {
     return false;
   }
+}
+
+async function localBranchExists(repoPath: string, branch: string): Promise<boolean> {
+  return gitRefExists(repoPath, `refs/heads/${branch}`);
 }
 
 async function copyDirectory(source: string, destination: string): Promise<void> {

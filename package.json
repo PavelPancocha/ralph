@@ -5,7 +5,7 @@
   "type": "module",
   "description": "SDK-native multi-agent spec runner for Codex.",
   "bin": {
-    "ralph": "./dist/src/cli.js"
+    "ralph": "./bin/ralph.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

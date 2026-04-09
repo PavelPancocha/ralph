@@ -171,6 +171,65 @@ git status --short
   return { projectRoot, workspaceRoot, repoRoot, paths };
 }
 
+async function writeWorkflowSpec(
+  projectRoot: string,
+  relativePath: string,
+  options: {
+    title: string;
+    sourceBranch: string;
+    createBranch: string;
+    prTarget?: string;
+    dependencies?: string[];
+  },
+): Promise<void> {
+  const absolute = path.join(projectRoot, "specs", relativePath);
+  await fs.mkdir(path.dirname(absolute), { recursive: true });
+  const dependencies = options.dependencies ?? ["None."];
+  await fs.writeFile(
+    absolute,
+    `# ${options.title}
+
+Repo: demo-repo
+Workdir: demo-repo
+
+## Branch Instructions
+- Source branch: \`${options.sourceBranch}\`
+- Create branch: \`${options.createBranch}\`
+- PR target: \`${options.prTarget ?? "dev"}\`
+
+## Goal
+Exercise Ralph workflow behavior.
+
+## Scope (In)
+- Touch one file.
+
+## Boundaries (Out, No Overlap)
+- No unrelated changes.
+
+## Constraints
+- Keep it minimal.
+
+## Dependencies
+${dependencies.map((dependency) => `- ${dependency}`).join("\n")}
+
+## Required Reading
+- \`README.md\`
+
+## Acceptance Criteria
+- Workflow completes or reports the expected dry-run diagnostic.
+
+## Commit Requirements
+- Use the requested branch.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+}
+
 function planningViewResponse(
   lens: "spec" | "repo" | "risks",
   summary: string,
@@ -224,6 +283,127 @@ function reviewLeadFollowUpResponse(
     followUpReviewers,
   });
 }
+
+test("executeSpec dry-run warns when a stacked parent branch is expected from an earlier spec", async () => {
+  const { projectRoot, workspaceRoot, paths } = await createTempProject();
+  await writeWorkflowSpec(projectRoot, "1002-stacked-child.md", {
+    title: "1002 - Stacked Child",
+    sourceBranch: "feature/demo",
+    createBranch: "feature/stacked-child",
+    dependencies: ["1001-demo.md"],
+  });
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1002-stacked-child.md");
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: true,
+      specFilters: [],
+    },
+    spec,
+    fakeWorkflowDeps(new FakeCodex([]), {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+    }),
+  );
+
+  assert.equal(outcome.status, "needs_more_work");
+  assert.match(outcome.summary, /feature\/demo/);
+  assert.match(outcome.summary, /1001-demo/);
+  assert.match(outcome.summary, /dry-run/i);
+  assert.equal(outcome.candidateCommit, undefined);
+  assert.deepEqual(progressEvents.map((event) => event.phase), ["dry-run"]);
+  assert.match(progressEvents[0]?.summary ?? "", /does not exist yet/i);
+  assert.equal(
+    await fs
+      .access(path.join(paths.worktreesRoot, spec.specId))
+      .then(() => true)
+      .catch(() => false),
+    false,
+  );
+});
+
+test("executeSpec dry-run fails cleanly when a spec points at a later spec branch", async () => {
+  const { projectRoot, workspaceRoot, paths } = await createTempProject();
+  await writeWorkflowSpec(projectRoot, "1002-invalid-parent.md", {
+    title: "1002 - Invalid Parent",
+    sourceBranch: "feature/future-parent",
+    createBranch: "feature/invalid-parent",
+  });
+  await writeWorkflowSpec(projectRoot, "1003-future-parent.md", {
+    title: "1003 - Future Parent",
+    sourceBranch: "dev",
+    createBranch: "feature/future-parent",
+  });
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1002-invalid-parent.md");
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: true,
+      specFilters: [],
+    },
+    spec,
+    fakeWorkflowDeps(new FakeCodex([]), {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+    }),
+  );
+
+  assert.equal(outcome.status, "failed");
+  assert.match(outcome.summary, /feature\/future-parent/);
+  assert.match(outcome.summary, /1003-future-parent/);
+  assert.match(outcome.summary, /ascending order/i);
+  assert.deepEqual(progressEvents.map((event) => event.phase), ["failed"]);
+  assert.match(progressEvents[0]?.summary ?? "", /later spec/i);
+});
+
+test("executeSpec dry-run fails cleanly when the source branch is missing and no spec creates it", async () => {
+  const { projectRoot, workspaceRoot, paths } = await createTempProject();
+  await writeWorkflowSpec(projectRoot, "1002-missing-root.md", {
+    title: "1002 - Missing Root",
+    sourceBranch: "release/missing-root",
+    createBranch: "feature/missing-root",
+  });
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1002-missing-root.md");
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: true,
+      specFilters: [],
+    },
+    spec,
+    fakeWorkflowDeps(new FakeCodex([]), {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+    }),
+  );
+
+  assert.equal(outcome.status, "failed");
+  assert.match(outcome.summary, /release\/missing-root/);
+  assert.match(outcome.summary, /no spec in this project creates it/i);
+  assert.deepEqual(progressEvents.map((event) => event.phase), ["failed"]);
+  assert.match(progressEvents[0]?.summary ?? "", /no spec/i);
+});
 
 test("executeSpec completes the supervised loop with an injected Codex backend", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();

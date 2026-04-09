@@ -57,6 +57,7 @@ npm install
 Then run it directly from the repo:
 
 ```bash
+npm run dev -- --help
 npm run dev -- --dry-run
 ```
 
@@ -71,6 +72,7 @@ npm link
 Then use:
 
 ```bash
+ralph --help
 ralph --dry-run
 ```
 
@@ -89,6 +91,9 @@ npm run dev -- 1001-demo
 
 # Dry run
 npm run dev -- --dry-run
+
+# Compact dry-run alias
+npm run dev -- --dryrun
 
 # Override workspace root
 npm run dev -- --workspace-root /path/to/workspace
@@ -110,6 +115,9 @@ npm run dev -- create-spec area/1234-sample-feature.md
 
 # Show runtime state
 npm run dev -- status
+
+# Show CLI help
+npm run dev -- --help
 ```
 
 `run` is the default command, so the common path does not need the explicit `run` subcommand. `npm run dev -- --dry-run` is equivalent to `npm run dev -- run --dry-run`.
@@ -123,7 +131,9 @@ npm run build
 npm link
 
 # Then use the linked CLI directly
+ralph --help
 ralph --dry-run
+ralph --dryrun
 ralph 1001-demo
 ralph status
 ralph inspect 1001-demo.md
