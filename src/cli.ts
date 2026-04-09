@@ -7,7 +7,15 @@ import { pathToFileURL } from "node:url";
 
 import type { RalphRunOptions, SupervisorOutcome, WorkflowProgressEvent } from "./types.js";
 import { executeSpec } from "./workflow.js";
-import { buildRuntimePaths, defaultWorkspaceRoot, ensureRuntimePaths, listRunStates, runEventLogPath, runtimeSummary } from "./runtime.js";
+import {
+  buildRuntimePaths,
+  defaultWorkspaceRoot,
+  ensureRuntimePaths,
+  listRunStates,
+  peekRunState,
+  runEventLogPath,
+  runtimeSummary,
+} from "./runtime.js";
 import { createSampleSpecFile, discoverSpecPaths, parseSpecFile } from "./specs.js";
 
 export interface ParsedArgs {
@@ -17,6 +25,7 @@ export interface ParsedArgs {
   model: string | undefined;
   maxIterations: number;
   dryRun: boolean;
+  toSpec: string | undefined;
   inspectTarget: string | undefined;
   createSpecTarget: string | undefined;
   parseError?: string;
@@ -64,6 +73,7 @@ export function renderHelpText(): string {
     "Commands: run, status, inspect, create-spec",
     "Options:",
     "  --dry-run, --dryrun        Preview matching specs without running Codex",
+    "  --to <spec>                Run sequentially through the target spec, starting at the first not-done spec",
     "  --workspace-root <path>    Override the workspace root",
     "  --model <model>            Force all Ralph-managed roles to one model",
     "  --max-iterations <n>       Limit the internal review/fix loop",
@@ -118,6 +128,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     model: undefined,
     maxIterations: 3,
     dryRun: false,
+    toSpec: undefined,
     workspaceRoot: undefined,
     inspectTarget: undefined,
     createSpecTarget: undefined,
@@ -161,6 +172,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.dryRun = true;
       continue;
     }
+    if (token === "--to") {
+      const toValue = rest[index + 1];
+      if (!toValue || toValue.startsWith("--")) {
+        parseError ??= "Missing --to value";
+      } else {
+        args.toSpec = toValue;
+        index += 1;
+      }
+      continue;
+    }
     if (args.command === "inspect" && !args.inspectTarget) {
       args.inspectTarget = token;
       continue;
@@ -198,7 +219,9 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     ? path.resolve(parsed.workspaceRoot)
     : defaultWorkspaceRoot(projectRoot);
   const paths = buildRuntimePaths(projectRoot, workspaceRoot);
-  await ensureRuntimePaths(paths);
+  if (!(parsed.command === "run" && parsed.dryRun)) {
+    await ensureRuntimePaths(paths);
+  }
 
   if (parsed.command === "status") {
     const states = await listRunStates(paths);
@@ -235,9 +258,40 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
   }
 
   const specPaths = await discoverSpecPaths(path.join(projectRoot, "specs"));
-  const selected = parsed.specFilters.length > 0
+  const filtered = parsed.specFilters.length > 0
     ? specPaths.filter((specPath) => parsed.specFilters.some((filter) => specPath.includes(filter)))
     : specPaths;
+
+  let selected = filtered;
+  if (parsed.toSpec) {
+    const matchingTargets = filtered.filter((specPath) => specPath.includes(parsed.toSpec as string));
+    if (matchingTargets.length === 0) {
+      console.error(`No specs matched --to ${parsed.toSpec}.`);
+      return 1;
+    }
+    if (matchingTargets.length > 1) {
+      console.error(`--to ${parsed.toSpec} is ambiguous: ${matchingTargets.join(", ")}`);
+      return 1;
+    }
+    const targetPath = matchingTargets[0]!;
+    const bounded = filtered.slice(0, filtered.indexOf(targetPath) + 1);
+    let firstPendingIndex = bounded.length;
+    for (const [index, relSpec] of bounded.entries()) {
+      const specId = path.basename(relSpec, ".md");
+      const state = await peekRunState(paths, specId);
+      const legacyDonePath = path.join(projectRoot, "specs", "done", relSpec);
+      const done = state?.status === "done" || (await pathExists(legacyDonePath));
+      if (!done) {
+        firstPendingIndex = index;
+        break;
+      }
+    }
+    if (firstPendingIndex === bounded.length) {
+      console.log(`All specs through ${targetPath} are already done.`);
+      return 0;
+    }
+    selected = bounded.slice(firstPendingIndex);
+  }
 
   if (selected.length === 0) {
     console.error("No specs matched.");
@@ -268,7 +322,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     try {
       const outcome = await executeSpecFn(paths, options, spec, {
         onProgress: (event): void => {
-          if (!printedLogPath) {
+          if (!printedLogPath && !parsed.dryRun) {
             const logPath = runEventLogPath(paths, spec.specId, event.runId);
             console.log(`[${specIndex}/${selected.length}] logs         ${path.relative(projectRoot, logPath).replaceAll(path.sep, "/")}`);
             printedLogPath = true;

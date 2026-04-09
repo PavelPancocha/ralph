@@ -4,6 +4,10 @@ Ralph is a spec-driven development runner built around the official Codex SDK. I
 
 This repository is the v2 rewrite. The old Python runner still exists in the tree, but the active implementation documented here is the Node/TypeScript CLI under [`src/`](./src).
 
+Documentation rule:
+
+- When CLI or runtime behavior changes, update [`README.md`](./README.md) and [`ralph_docs.md`](./ralph_docs.md) in the same change.
+
 ## What Ralph Does
 
 For each spec, Ralph runs a fixed role pipeline:
@@ -59,6 +63,7 @@ Then run it directly from the repo:
 ```bash
 npm run dev -- --help
 npm run dev -- --dry-run
+npm run dev -- --to 1003
 ```
 
 If you want a real `ralph` command on your machine, install this repository as a linked CLI:
@@ -74,6 +79,7 @@ Then use:
 ```bash
 ralph --help
 ralph --dry-run
+ralph --to 1003
 ```
 
 Because the package is currently private and not published, there is no `npm install -g ralph` or `npx ralph` flow yet. If we want that level of simplicity, the next step is to publish the package or ship release binaries.
@@ -94,6 +100,10 @@ npm run dev -- --dry-run
 
 # Compact dry-run alias
 npm run dev -- --dryrun
+
+# Run sequentially through a target spec, starting at the first
+# spec in that range that is not already done
+npm run dev -- --to 1003
 
 # Override workspace root
 npm run dev -- --workspace-root /path/to/workspace
@@ -134,6 +144,7 @@ npm link
 ralph --help
 ralph --dry-run
 ralph --dryrun
+ralph --to 1003
 ralph 1001-demo
 ralph status
 ralph inspect 1001-demo.md
@@ -155,6 +166,10 @@ node dist/src/cli.js run --dry-run
 ```
 
 `run` streams per-spec progress to the terminal with `[current/total]` prefixes, phase changes, and a per-run log path under `.ralph/runs/<spec-id>/<run-id>/events.log`.
+
+`--to <spec>` runs sequentially through the ordered backlog up to the matching target spec and starts from the first spec in that bounded range that is not already done.
+
+`--dry-run` is truly read-only. It does not create worktrees, runtime state, event logs, artifacts, or `codex-home`. It only validates dry-run preconditions and prints what Ralph would do.
 
 Without `--model`, Ralph uses a smart role policy by default:
 
@@ -188,6 +203,13 @@ ralph/
 ├── README.md
 └── ralph_docs.md
 ```
+
+Dry-run exception:
+
+- `--dry-run` does not populate `.ralph/`
+- no worktree is created
+- no state, artifact, or event-log files are written
+- terminal output is the only dry-run output
 
 ## Spec Compatibility
 

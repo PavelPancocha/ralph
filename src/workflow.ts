@@ -42,6 +42,7 @@ import {
   initialRunState,
   legacyDoneExists,
   loadRunState,
+  peekRunState,
   resolveRepoPath,
   saveArtifact,
   saveDoneReport,
@@ -628,6 +629,7 @@ async function emitProgress(
   runId: string,
   deps: WorkflowDependencies,
   event: Omit<WorkflowProgressEvent, "timestamp" | "runId" | "specId" | "specTitle">,
+  persist = true,
 ): Promise<void> {
   const progressEvent: WorkflowProgressEvent = {
     timestamp: new Date().toISOString(),
@@ -636,7 +638,9 @@ async function emitProgress(
     specTitle: spec.title,
     ...event,
   };
-  await appendRunEvent(paths, progressEvent);
+  if (persist) {
+    await appendRunEvent(paths, progressEvent);
+  }
   await deps.onProgress?.(progressEvent);
 }
 
@@ -764,10 +768,10 @@ export async function executeSpec(
   spec: SpecDocument,
   deps: WorkflowDependencies = {},
 ): Promise<SupervisorOutcome> {
-  await ensureCodexHome(paths);
   const repoPath = await resolveRepoPath(paths, spec);
   const legacyDone = await legacyDoneExists(paths.projectRoot, spec);
-  let state = (await loadRunState(paths, spec.specId)) ?? initialRunState(spec, legacyDone);
+  let state = ((options.dryRun ? await peekRunState(paths, spec.specId) : await loadRunState(paths, spec.specId)))
+    ?? initialRunState(spec, legacyDone);
   if (state.status === "done") {
     return {
       status: "done",
@@ -782,23 +786,32 @@ export async function executeSpec(
   const runId = createRunId();
   state.runId = runId;
   state.updatedAt = new Date().toISOString();
-  await saveRunState(paths, state);
 
   if (options.dryRun) {
     const dryRunSourceOutcome = await analyzeDryRunSourceBranch(paths, spec, repoPath);
     if (dryRunSourceOutcome) {
-      await saveArtifact(paths, spec.specId, runId, "dry-run", {
-        spec,
-        repoPath,
-        ...dryRunSourceOutcome.artifact,
-      });
       await emitProgress(paths, spec, runId, deps, {
         phase: dryRunSourceOutcome.phase,
         summary: dryRunSourceOutcome.outcome.summary,
-      });
+      }, false);
       return dryRunSourceOutcome.outcome;
     }
+    const plannedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+    const dryOutcome: SupervisorOutcome = {
+      status: "needs_more_work",
+      summary: `Dry run would use worktree at ${plannedWorktreePath} for branch ${spec.branchInstructions.createBranch}.`,
+      candidateCommit: undefined,
+      nextAction: "Run without --dry-run to execute the workflow.",
+    };
+    await emitProgress(paths, spec, runId, deps, {
+      phase: "dry-run",
+      summary: `would use worktree at ${plannedWorktreePath}`,
+    }, false);
+    return dryOutcome;
   }
+
+  await ensureCodexHome(paths);
+  await saveRunState(paths, state);
 
   const worktreePath = await ensureSpecWorktree(paths, spec, repoPath);
   const additionalDirectories = await worktreeAdditionalDirectories(worktreePath);
@@ -808,21 +821,6 @@ export async function executeSpec(
     phase: "setup",
     summary: `worktree ready at ${worktreePath}`,
   });
-
-  if (options.dryRun) {
-    const dryOutcome: SupervisorOutcome = {
-      status: "needs_more_work",
-      summary: `Dry run prepared worktree at ${worktreePath}`,
-      candidateCommit: undefined,
-      nextAction: "Run without --dry-run to execute the workflow.",
-    };
-    await saveArtifact(paths, spec.specId, runId, "dry-run", { spec, worktreePath, repoPath });
-    await emitProgress(paths, spec, runId, deps, {
-      phase: "dry-run",
-      summary: `prepared worktree at ${worktreePath}`,
-    });
-    return dryOutcome;
-  }
 
   const codexFactory = deps.createCodex ?? createCodex;
   const implementationCandidateValidator = deps.validateImplementationCandidate ?? validateImplementationCandidate;

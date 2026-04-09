@@ -1192,6 +1192,7 @@ test("executeSpec returns early for dry runs without starting agent threads", as
   const { projectRoot, workspaceRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const fakeCodex = new FakeCodex([]);
+  const progressEvents: WorkflowProgressEvent[] = [];
 
   const outcome = await executeSpec(
     paths,
@@ -1204,15 +1205,23 @@ test("executeSpec returns early for dry runs without starting agent threads", as
       specFilters: [],
     },
     spec,
-    fakeWorkflowDeps(fakeCodex),
+    fakeWorkflowDeps(fakeCodex, {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+    }),
   );
 
   assert.equal(outcome.status, "needs_more_work");
   assert.deepEqual(fakeCodex.prompts, []);
-
-  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
-  assert.equal(state.worktreePath, path.join(paths.worktreesRoot, spec.specId));
-  await fs.access(path.join(paths.artifactsRoot, spec.specId, state.runId!, "dry-run.json"));
+  assert.deepEqual(progressEvents.map((event) => event.phase), ["dry-run"]);
+  assert.match(progressEvents[0]?.summary ?? "", /would use worktree/i);
+  await assert.rejects(fs.access(path.join(paths.stateRoot, `${spec.specId}.json`)));
+  await assert.rejects(fs.access(path.join(paths.artifactsRoot, spec.specId)));
+  await assert.rejects(fs.access(path.join(paths.worktreesRoot, spec.specId)));
+  await assert.rejects(fs.access(path.join(paths.ralphRoot, "codex-home")));
+  const runLogs = await fs.readdir(path.join(paths.runsRoot, spec.specId)).catch(() => []);
+  assert.deepEqual(runLogs, []);
 });
 
 test("executeSpec skips specs with a legacy done marker before starting any agent threads", async () => {

@@ -7,6 +7,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
 import { parseArgs, runCommand } from "../src/cli.js";
+import { buildRuntimePaths, ensureRuntimePaths } from "../src/runtime.js";
 
 const execFile = promisify(execFileCb);
 
@@ -105,6 +106,13 @@ test("parseArgs accepts --dryrun as a dry-run alias", () => {
   assert.equal(parsed.dryRun, true);
 });
 
+test("parseArgs accepts --to for bounded sequential runs", () => {
+  const parsed = parseArgs(["run", "--to", "1018", "--dry-run"]);
+  assert.equal(parsed.parseError, undefined);
+  assert.equal(parsed.toSpec, "1018");
+  assert.equal(parsed.dryRun, true);
+});
+
 test("parseArgs leaves model unset when --model is omitted so smart role policy can decide", () => {
   const parsed = parseArgs(["run", "1001-demo"]);
   assert.equal(parsed.model, undefined);
@@ -113,6 +121,11 @@ test("parseArgs leaves model unset when --model is omitted so smart role policy 
 test("parseArgs rejects --model when the explicit value is missing", () => {
   assert.equal(parseArgs(["run", "--model"]).parseError, "Missing --model value");
   assert.equal(parseArgs(["run", "--model", "--dry-run"]).parseError, "Missing --model value");
+});
+
+test("parseArgs rejects --to when the explicit value is missing", () => {
+  assert.equal(parseArgs(["run", "--to"]).parseError, "Missing --to value");
+  assert.equal(parseArgs(["run", "--to", "--dry-run"]).parseError, "Missing --to value");
 });
 
 test("parseArgs rejects unknown long options instead of treating them as spec filters", () => {
@@ -154,6 +167,7 @@ test("create-spec scaffolds a spec with required and recommended sections", asyn
       model: "gpt-5.3-codex",
       maxIterations: 3,
       dryRun: false,
+      toSpec: undefined,
       inspectTarget: undefined,
       createSpecTarget: specTarget,
     });
@@ -201,6 +215,7 @@ test("runCommand streams spec-indexed progress lines and log paths during run", 
         model: "gpt-5.3-codex",
         maxIterations: 3,
         dryRun: false,
+        toSpec: undefined,
         inspectTarget: undefined,
         createSpecTarget: undefined,
       },
@@ -270,6 +285,7 @@ test("runCommand logs the smart role policy banner when model is omitted", async
         model: undefined,
         maxIterations: 3,
         dryRun: false,
+        toSpec: undefined,
         inspectTarget: undefined,
         createSpecTarget: undefined,
       },
@@ -312,6 +328,7 @@ test("runCommand auto-detects a nested ralph project root when invoked from the 
         model: undefined,
         maxIterations: 3,
         dryRun: true,
+        toSpec: undefined,
         inspectTarget: undefined,
         createSpecTarget: undefined,
       },
@@ -333,6 +350,120 @@ test("runCommand auto-detects a nested ralph project root when invoked from the 
   }
 
   assert.equal(executedSpecId, "1001-one");
+});
+
+test("runCommand does not create runtime directories for dry-run", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-dry-no-write-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+
+  const previousCwd = process.cwd();
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: [],
+        workspaceRoot: tempRoot,
+        model: undefined,
+        maxIterations: 3,
+        dryRun: true,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+        toSpec: undefined,
+      },
+      {
+        executeSpec: async () => ({
+          status: "needs_more_work",
+          summary: "Dry run validated setup.",
+          candidateCommit: undefined,
+          nextAction: "none",
+        }),
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+  }
+
+  await assert.rejects(fs.access(path.join(tempRoot, ".ralph")));
+});
+
+test("runCommand with --to starts from the first spec that is not already done", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-to-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+  await writeRunnableSpec(tempRoot, "1002-two.md", "1002 - Two");
+  await writeRunnableSpec(tempRoot, "1003-three.md", "1003 - Three");
+  await writeRunnableSpec(tempRoot, "1004-four.md", "1004 - Four");
+
+  const paths = buildRuntimePaths(tempRoot, tempRoot);
+  await ensureRuntimePaths(paths);
+  await fs.writeFile(
+    path.join(paths.stateRoot, "1001-one.json"),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: "1001-one",
+      specRel: "1001-one.md",
+      status: "done",
+      currentIteration: 1,
+      updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(paths.stateRoot, "1002-two.json"),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: "1002-two",
+      specRel: "1002-two.md",
+      status: "done",
+      currentIteration: 1,
+      updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const previousCwd = process.cwd();
+  const executedSpecIds: string[] = [];
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: [],
+        workspaceRoot: tempRoot,
+        model: undefined,
+        maxIterations: 3,
+        dryRun: false,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+        toSpec: "1004",
+      },
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          executedSpecIds.push(spec.specId);
+          return {
+            status: "done",
+            summary: `Completed ${spec.specId}.`,
+            candidateCommit: "1234567890abcdef1234567890abcdef12345678",
+            nextAction: "none",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+  }
+
+  assert.deepEqual(executedSpecIds, ["1003-three", "1004-four"]);
 });
 
 test("runCommand keeps going after a failed spec outcome and exits 1 after the full pass", async () => {
@@ -357,6 +488,7 @@ test("runCommand keeps going after a failed spec outcome and exits 1 after the f
         model: undefined,
         maxIterations: 3,
         dryRun: true,
+        toSpec: undefined,
         inspectTarget: undefined,
         createSpecTarget: undefined,
       },

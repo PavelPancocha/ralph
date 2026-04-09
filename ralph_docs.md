@@ -17,6 +17,10 @@ Ralph is a local spec runner that:
 
 The design goal is to preserve the old Ralph feel, meaning a file-first backlog and inspectable local artifacts, while replacing the runtime with the official Codex SDK and a stronger role-based loop.
 
+Documentation rule:
+
+- When CLI or runtime behavior changes, update [`README.md`](./README.md) and [`ralph_docs.md`](./ralph_docs.md) in the same change.
+
 ## High-Level Flow
 
 For a runnable spec, Ralph executes this sequence:
@@ -87,7 +91,7 @@ Provides the public CLI:
 - `inspect`
 - `create-spec`
 
-It parses command-line flags, loads specs, creates runtime directories, and calls `executeSpec(...)`.
+It parses command-line flags, loads specs, resolves `--to` bounded runs, creates runtime directories for real runs, and calls `executeSpec(...)`.
 
 #### `src/specs.ts`
 
@@ -137,6 +141,13 @@ It:
 - emits progress events for terminal streaming and `.ralph/runs/.../events.log`
 - loops review/recheck iterations with role-aware model escalation
 - writes the final done report on success
+
+Dry-run special case:
+
+- does not create worktrees
+- does not create `.ralph/state`, `.ralph/artifacts`, `.ralph/runs`, or `codex-home`
+- does not write event logs
+- only validates dry-run preconditions and prints what Ralph would do
 
 ## Runtime Layout
 
@@ -354,7 +365,17 @@ npm run dev -- --dry-run
 npm run dev -- --dryrun
 ```
 
-During `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/3 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
+Dry-run is read-only. It prints spec-indexed progress lines, but it does not create worktrees, state files, artifacts, or event logs.
+
+### Run through a target spec
+
+```bash
+npm run dev -- --to 1003
+```
+
+`--to <spec>` takes the ordered spec list up to the matching target spec and starts from the first spec in that bounded range that is not already done.
+
+During a real `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/3 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
 
 `run` is the default command, so `npm run dev -- --dry-run` is equivalent to `npm run dev -- run --dry-run`.
 
@@ -399,6 +420,7 @@ npm link
 
 ralph --dry-run
 ralph --dryrun
+ralph --to 1003
 ralph 1001-demo
 ralph status
 ralph inspect 1001-demo.md
@@ -439,6 +461,8 @@ The workflow file is:
 
 - Ralph is local-first. It expects to operate on repositories already present in the workspace.
 - The CLI exposes `run`, `status`, `inspect`, and `create-spec`. There is no dedicated `resume` command yet because persistent state plus stable worktree paths already provide the base for restart-safe execution.
+- `--to <spec>` is the built-in bounded batch operator flow for sequential backlog execution.
+- `--dry-run` is intentionally non-persistent: no `.ralph/` writes happen during dry-run.
 - The current review loop is capped by `--max-iterations`.
 - Success is determined by structured agent outputs and the recheck verdict, not by heuristics on plain terminal output.
 

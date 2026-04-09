@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Documentation sync rule:
+
+- When CLI or runtime behavior changes, update `README.md` and `ralph_docs.md` in the same change.
+
 ## Overview
 
 Ralph is an autonomous spec-based development runner for AI coding agents. It orchestrates [Codex](https://github.com/openai/codex) to implement specs in a two-phase loop: **implement → verify → done**. A spec is only marked complete after an independent verification run confirms the implementation.

@@ -201,6 +201,12 @@ export async function loadRunState(paths: RuntimePaths, specId: string): Promise
   return loaded.normalized;
 }
 
+export async function peekRunState(paths: RuntimePaths, specId: string): Promise<RunState | null> {
+  const statePath = path.join(paths.stateRoot, `${specId}.json`);
+  const loaded = await readNormalizedRunState(statePath, specId);
+  return loaded?.normalized ?? null;
+}
+
 export async function saveRunState(paths: RuntimePaths, state: RunState): Promise<void> {
   const statePath = path.join(paths.stateRoot, `${state.specId}.json`);
   await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
