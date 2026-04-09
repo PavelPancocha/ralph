@@ -292,6 +292,8 @@ The old Python files are still present in the repository, but they are not the c
 
 ### Install and verify
 
+Ralph is not currently published as a public npm package. This repository is the install source.
+
 ```bash
 npm install
 npm run check
@@ -299,43 +301,77 @@ npm test
 npm run build
 ```
 
-### Run
+### Install options
+
+If you are operating Ralph from this repository, the lightest setup is:
 
 ```bash
-node dist/src/cli.js run
+npm install
+```
+
+Then run it directly:
+
+```bash
+npm run dev -- --dry-run
+```
+
+If you want a machine-level `ralph` command, link this repository as a CLI:
+
+```bash
+npm install
+npm run build
+npm link
+```
+
+Then use:
+
+```bash
+ralph --dry-run
+```
+
+Because the package is still private, there is no public `npm install -g ralph` or `npx ralph` flow yet.
+
+### Recommended Local Usage
+
+When you are working inside this repository, prefer the dev script instead of calling the compiled file directly.
+
+```bash
+npm run dev
 ```
 
 ### Run selected specs
 
 ```bash
-node dist/src/cli.js run 1001-demo
+npm run dev -- 1001-demo
 ```
 
 ### Dry run
 
 ```bash
-node dist/src/cli.js run --dry-run
+npm run dev -- --dry-run
 ```
 
 During `run`, Ralph prints spec-indexed progress lines such as `[1/3] planning iter 1/3 ...` and tells you where the matching `.ralph/runs/<spec-id>/<run-id>/events.log` file lives.
 
+`run` is the default command, so `npm run dev -- --dry-run` is equivalent to `npm run dev -- run --dry-run`.
+
 ### Status
 
 ```bash
-node dist/src/cli.js status
+npm run dev -- status
 ```
 
 ### Inspect parsed spec output
 
 ```bash
-node dist/src/cli.js inspect 1001-demo.md
+npm run dev -- inspect 1001-demo.md
 ```
 
 ### Create a sample spec
 
 ```bash
-node dist/src/cli.js create-spec 1234-my-new-spec.md
-node dist/src/cli.js create-spec area/1235-follow-up-spec.md
+npm run dev -- create-spec 1234-my-new-spec.md
+npm run dev -- create-spec area/1235-follow-up-spec.md
 ```
 
 This command creates a new markdown file under `specs/` and prepopulates it with:
@@ -343,6 +379,29 @@ This command creates a new markdown file under `specs/` and prepopulates it with
 - required sections the parser/runtime currently depend on
 - recommended sections that help produce better execution packets and reviews
 - placeholder branch instructions and verification blocks
+
+### Installed CLI Usage
+
+If you want the cleaner command form outside the repo wrapper:
+
+```bash
+npm run build
+npm link
+
+ralph --dry-run
+ralph 1001-demo
+ralph status
+ralph inspect 1001-demo.md
+ralph create-spec area/1235-follow-up-spec.md
+```
+
+### Low-Level Fallback
+
+The compiled entrypoint is still available, but it should mostly be treated as a packaging/debugging fallback:
+
+```bash
+node dist/src/cli.js run --dry-run
+```
 
 ## Testing And CI
 
@@ -369,7 +428,7 @@ The workflow file is:
 ## Operational Notes
 
 - Ralph is local-first. It expects to operate on repositories already present in the workspace.
-- The CLI currently exposes `run`, `status`, and `inspect`. There is no dedicated `resume` command yet because persistent state plus stable worktree paths already provide the base for restart-safe execution.
+- The CLI exposes `run`, `status`, `inspect`, and `create-spec`. There is no dedicated `resume` command yet because persistent state plus stable worktree paths already provide the base for restart-safe execution.
 - The current review loop is capped by `--max-iterations`.
 - Success is determined by structured agent outputs and the recheck verdict, not by heuristics on plain terminal output.
 

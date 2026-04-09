@@ -24,9 +24,18 @@ The runner is file-first and local-first:
 - Each spec gets a dedicated worktree under `.ralph/worktrees/`
 - Human-readable and machine-readable artifacts are written to disk
 
-## Current CLI
+## CLI Usage
 
-The current entrypoint is [`src/cli.ts`](./src/cli.ts). After building, the executable is `dist/src/cli.js`.
+The active CLI entrypoint is [`src/cli.ts`](./src/cli.ts).
+
+Ralph is not currently published as a public npm package. This repository is the install source.
+
+In normal use, prefer:
+
+- `npm run dev -- ...` while working inside this repository
+- `ralph ...` after linking or installing the package
+
+The raw compiled file `dist/src/cli.js` still exists, but it should be treated as a low-level fallback rather than the primary operator interface.
 
 ### Development commands
 
@@ -37,44 +46,102 @@ npm test
 npm run build
 ```
 
-### Run Ralph
+### Install
+
+If you just want to run Ralph from this repository, installation is:
+
+```bash
+npm install
+```
+
+Then run it directly from the repo:
+
+```bash
+npm run dev -- --dry-run
+```
+
+If you want a real `ralph` command on your machine, install this repository as a linked CLI:
+
+```bash
+npm install
+npm run build
+npm link
+```
+
+Then use:
+
+```bash
+ralph --dry-run
+```
+
+Because the package is currently private and not published, there is no `npm install -g ralph` or `npx ralph` flow yet. If we want that level of simplicity, the next step is to publish the package or ship release binaries.
+
+### Run Ralph Locally
+
+Inside this repository, the friendliest way to use Ralph is through the existing dev script:
 
 ```bash
 # Run all specs
-node dist/src/cli.js run
+npm run dev
 
 # Run matching specs only
-node dist/src/cli.js run 1001-demo
+npm run dev -- 1001-demo
 
 # Dry run
-node dist/src/cli.js run --dry-run
+npm run dev -- --dry-run
 
 # Override workspace root
-node dist/src/cli.js run --workspace-root /path/to/workspace
+npm run dev -- --workspace-root /path/to/workspace
 
 # Override all Ralph-managed roles to one model
-node dist/src/cli.js run --model gpt-5.4
+npm run dev -- --model gpt-5.4
 
 # Limit internal review/fix iterations
-node dist/src/cli.js run --max-iterations 3
+npm run dev -- --max-iterations 3
 
 # Inspect parsed spec JSON
-node dist/src/cli.js inspect 1001-demo.md
+npm run dev -- inspect 1001-demo.md
 
 # Inspect a nested spec (path is relative to specs/)
-node dist/src/cli.js inspect area/1235-follow-up-spec.md
+npm run dev -- inspect area/1235-follow-up-spec.md
 
 # Create a new sample spec
-node dist/src/cli.js create-spec area/1234-sample-feature.md
+npm run dev -- create-spec area/1234-sample-feature.md
 
 # Show runtime state
-node dist/src/cli.js status
+npm run dev -- status
 ```
 
-For local development without building first:
+`run` is the default command, so the common path does not need the explicit `run` subcommand. `npm run dev -- --dry-run` is equivalent to `npm run dev -- run --dry-run`.
+
+### Use As A Real CLI
+
+If you want a cleaner operator experience outside the repo command wrapper:
 
 ```bash
-node --import tsx ./src/cli.ts run
+npm run build
+npm link
+
+# Then use the linked CLI directly
+ralph --dry-run
+ralph 1001-demo
+ralph status
+ralph inspect 1001-demo.md
+ralph create-spec area/1234-sample-feature.md
+```
+
+Explicit subcommands still work when you want them:
+
+```bash
+ralph run --dry-run
+```
+
+### Low-Level Fallback
+
+Only use the compiled path directly if you are debugging the packaged entrypoint:
+
+```bash
+node dist/src/cli.js run --dry-run
 ```
 
 `run` streams per-spec progress to the terminal with `[current/total]` prefixes, phase changes, and a per-run log path under `.ralph/runs/<spec-id>/<run-id>/events.log`.
@@ -119,8 +186,8 @@ Ralph v2 is designed to keep using the existing spec backlog format. Specs still
 To scaffold a new spec file with the required and recommended sections already in place:
 
 ```bash
-node dist/src/cli.js create-spec 1234-my-new-spec.md
-node dist/src/cli.js create-spec area/1235-follow-up-spec.md
+npm run dev -- create-spec 1234-my-new-spec.md
+npm run dev -- create-spec area/1235-follow-up-spec.md
 ```
 
 For a runnable spec, the parser currently requires:
