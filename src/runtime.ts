@@ -846,9 +846,10 @@ export async function installCheckoutCodexSupport(
   if (strictOwnership && (await pathExists(dest)) && !(await pathExists(markerPath))) {
     throw new Error(`Refusing to overwrite existing .codex in ${checkoutPath} because it is not Ralph-managed.`);
   }
+  await fs.mkdir(dest, { recursive: true });
+  await fs.writeFile(markerPath, "managed-by=ralph\n", "utf8");
   await ignoreCheckoutPath(checkoutPath, ".codex/");
   await copyDirectory(source, dest);
-  await fs.writeFile(markerPath, "managed-by=ralph\n", "utf8");
 }
 
 export async function installWorktreeCodexSupport(paths: RuntimePaths, worktreePath: string): Promise<void> {
@@ -962,18 +963,18 @@ export async function prepareRootCheckout(
   paths: RuntimePaths,
   spec: SpecDocument,
   repoPath: string,
+  options: { allowDirty?: boolean } = {},
 ): Promise<string> {
+  const allowDirty = options.allowDirty === true;
   const codexPath = path.join(repoPath, ".codex");
   const codexMarkerPath = path.join(codexPath, ".ralph-managed");
-  if ((await pathExists(codexPath)) && !(await pathExists(codexMarkerPath))) {
+  const codexExists = await pathExists(codexPath);
+  const codexManaged = await pathExists(codexMarkerPath);
+  if (codexExists && !codexManaged) {
     throw new Error(`Refusing to overwrite existing .codex in ${repoPath} because it is not Ralph-managed.`);
   }
-
-  const dirtyEntries = await readGitLines(repoPath, ["status", "--short"]);
-  if (dirtyEntries.length > 0) {
-    throw new Error(
-      `Root checkout mode requires a clean repository at ${repoPath}; found uncommitted changes: ${dirtyEntries.join(" | ")}`,
-    );
+  if (codexManaged) {
+    await ignoreCheckoutPath(repoPath, ".codex/");
   }
 
   const currentBranch = await readGitBranch(repoPath);
@@ -981,22 +982,54 @@ export async function prepareRootCheckout(
     throw new Error(`Root checkout mode requires a named branch in ${repoPath}; detached HEAD is not supported.`);
   }
 
-  if (await localBranchExists(repoPath, spec.branchInstructions.createBranch)) {
-    await checkoutGitRef(repoPath, spec.branchInstructions.createBranch);
-  } else {
-    await checkoutGitRef(repoPath, spec.branchInstructions.sourceBranch);
-    await execFileAsync("git", [
-      "-C",
-      repoPath,
-      "checkout",
-      "--ignore-other-worktrees",
-      "-b",
-      spec.branchInstructions.createBranch,
-    ]);
+  const dirtyEntries = await readGitLines(repoPath, ["status", "--short"]);
+  if (dirtyEntries.length > 0) {
+    if (allowDirty) {
+      if (currentBranch !== spec.branchInstructions.createBranch) {
+        throw new Error(
+          `Root checkout resume requires the existing dirty checkout to stay on ${spec.branchInstructions.createBranch}, not ${currentBranch}.`,
+        );
+      }
+    } else {
+      throw new Error(
+        `Root checkout mode requires a clean repository at ${repoPath}; found uncommitted changes: ${dirtyEntries.join(" | ")}`,
+      );
+    }
   }
 
-  await installCheckoutCodexSupport(paths, repoPath, true);
-  return repoPath;
+  let switchedBranch = false;
+  try {
+    if (currentBranch !== spec.branchInstructions.createBranch) {
+      if (await localBranchExists(repoPath, spec.branchInstructions.createBranch)) {
+        await checkoutGitRef(repoPath, spec.branchInstructions.createBranch);
+        switchedBranch = true;
+      } else {
+        await checkoutGitRef(repoPath, spec.branchInstructions.sourceBranch);
+        switchedBranch = currentBranch !== spec.branchInstructions.sourceBranch;
+        await execFileAsync("git", [
+          "-C",
+          repoPath,
+          "checkout",
+          "--ignore-other-worktrees",
+          "-b",
+          spec.branchInstructions.createBranch,
+        ]);
+        switchedBranch = true;
+      }
+    }
+
+    await installCheckoutCodexSupport(paths, repoPath, true);
+    return repoPath;
+  } catch (error) {
+    if (switchedBranch) {
+      try {
+        await checkoutGitRef(repoPath, currentBranch);
+      } catch {
+        // Preserve the original setup failure; branch restoration is best effort only.
+      }
+    }
+    throw error;
+  }
 }
 
 export function createRunId(): string {

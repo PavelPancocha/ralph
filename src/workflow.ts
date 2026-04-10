@@ -336,8 +336,8 @@ function resolveCheckoutMode(checkoutMode: CheckoutMode | undefined): CheckoutMo
   return checkoutMode ?? "worktree";
 }
 
-function specNeedsDockerSocket(spec: SpecDocument): boolean {
-  return spec.verificationCommands.some((command) => /\bdocker(?:\s+compose)?\b/i.test(command));
+function commandsNeedDockerSocket(commands: string[]): boolean {
+  return commands.some((command) => /\bdocker(?:\s+compose)?\b/i.test(command));
 }
 
 function planningHelperLens(role: typeof planningHelperRoles[number]): PlanningLens {
@@ -1020,6 +1020,7 @@ export async function executeSpec(
   const runId = createRunId();
   state.updatedAt = new Date().toISOString();
   const restartFailureContext = state.invalidationReason ?? state.lastError;
+  const allowDirtyRootCheckout = checkoutMode === "root" && options.resume === true && resumeCheckpoint !== null;
 
   if (options.dryRun) {
     const dryRunSourceOutcome = await analyzeDryRunSourceBranch(paths, spec, repoPath);
@@ -1057,12 +1058,9 @@ export async function executeSpec(
   await saveRunState(paths, state);
 
   const worktreePath = checkoutMode === "root"
-    ? await prepareRootCheckout(paths, spec, repoPath)
+    ? await prepareRootCheckout(paths, spec, repoPath, { allowDirty: allowDirtyRootCheckout })
     : await ensureSpecWorktree(paths, spec, repoPath);
   const additionalDirectories = await checkoutAdditionalDirectories(worktreePath);
-  const dockerAdditionalDirectories = checkoutMode === "root" && specNeedsDockerSocket(spec)
-    ? [...new Set([...additionalDirectories, "/var/run"])]
-    : additionalDirectories;
   state.checkoutMode = checkoutMode;
   state.worktreePath = worktreePath;
   await saveRunState(paths, state);
@@ -1232,6 +1230,10 @@ export async function executeSpec(
     currentUnderstanding: UnderstandingPacket,
     escalated: boolean,
   ): Promise<ImplementationReport | null> => {
+    const implementationAdditionalDirectories =
+      checkoutMode === "root" && commandsNeedDockerSocket(currentUnderstanding.verificationCommands)
+        ? [...new Set([...additionalDirectories, "/var/run"])]
+        : additionalDirectories;
     state.status = "implementing";
     await saveRunState(paths, state);
     await emitProgress(paths, spec, runId, deps, {
@@ -1245,7 +1247,7 @@ export async function executeSpec(
       spec,
       state,
       runId,
-      implementerOptions(options.model, worktreePath, dockerAdditionalDirectories, escalated, checkoutMode),
+      implementerOptions(options.model, worktreePath, implementationAdditionalDirectories, escalated, checkoutMode),
       implementationReportOutputSchema,
       buildImplementerPrompt(
         spec,
@@ -1356,6 +1358,10 @@ export async function executeSpec(
     currentImplementation: ImplementationReport,
     checkpoint: ResumeCheckpoint | null,
   ): Promise<SupervisorOutcome | "continue"> => {
+    const reviewAdditionalDirectories =
+      checkoutMode === "root" && commandsNeedDockerSocket(currentUnderstanding.verificationCommands)
+        ? [...new Set([...additionalDirectories, "/var/run"])]
+        : additionalDirectories;
     state.status = "reviewing";
     await saveRunState(paths, state);
 
@@ -1384,7 +1390,7 @@ export async function executeSpec(
           worktreePath,
           options.model,
           reviewer,
-          dockerAdditionalDirectories,
+          reviewAdditionalDirectories,
           checkoutMode,
           retryingFromFailure,
         ),
@@ -1442,7 +1448,7 @@ export async function executeSpec(
             spec,
             state,
             runId,
-            reviewerRoleOptions(worktreePath, options.model, reviewer, dockerAdditionalDirectories, checkoutMode, true),
+            reviewerRoleOptions(worktreePath, options.model, reviewer, reviewAdditionalDirectories, checkoutMode, true),
             reviewerReportOutputSchema,
             buildReviewerPrompt(reviewer, spec, currentUnderstanding, currentImplementation, worktreePath, true),
           );

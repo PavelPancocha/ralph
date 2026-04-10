@@ -388,6 +388,39 @@ test("prepareRootCheckout refuses to overwrite a user-managed .codex directory",
   );
 });
 
+test("prepareRootCheckout repairs the git exclude entry for an existing Ralph-managed .codex before running the dirty-tree preflight", async () => {
+  const { repoRoot, paths, spec } = await createRuntimeFixture();
+  const codexDir = path.join(repoRoot, ".codex");
+  await fs.mkdir(codexDir, { recursive: true });
+  await fs.writeFile(path.join(codexDir, ".ralph-managed"), "managed-by=ralph\n", "utf8");
+  await fs.writeFile(path.join(codexDir, "config.toml"), "stale = true\n", "utf8");
+
+  const { stdout: preflightStatus } = await execFile("git", ["-C", repoRoot, "status", "--short"]);
+  assert.match(preflightStatus, /\?\? \.codex\//);
+
+  const checkoutPath = await prepareRootCheckout(paths, spec, repoRoot);
+  const excludeContents = await fs.readFile(path.join(repoRoot, ".git", "info", "exclude"), "utf8");
+  const { stdout: postStatus } = await execFile("git", ["-C", repoRoot, "status", "--short"]);
+
+  assert.equal(checkoutPath, repoRoot);
+  assert.match(excludeContents, /(^|\n)\.codex\/(\n|$)/);
+  assert.equal(postStatus.trim(), "");
+});
+
+test("prepareRootCheckout restores the original branch if checkout setup fails after switching branches", async () => {
+  const { repoRoot, paths, spec } = await createRuntimeFixture();
+  await fs.rm(path.join(paths.projectRoot, "codex-support"), { recursive: true, force: true });
+
+  await assert.rejects(
+    () => prepareRootCheckout(paths, spec, repoRoot),
+    /ENOENT|no such file/i,
+  );
+
+  const { stdout: branchName } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
+  assert.equal(branchName.trim(), "dev");
+  await fs.access(path.join(repoRoot, ".codex", ".ralph-managed"));
+});
+
 test("runVerificationCommands checks out the feature branch in the main repo and restores the original branch", async () => {
   const { repoRoot, spec } = await createRuntimeFixture();
   const { runVerificationCommands } = await import("../src/runtime.js");

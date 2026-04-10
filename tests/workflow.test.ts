@@ -645,7 +645,7 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
 test("executeSpec root checkout mode uses the repo root and grants Docker access only to implementer and reviewers", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
-  spec.verificationCommands = ["docker compose run --rm app pytest billing/tests/test_demo.py"];
+  spec.verificationCommands = ["git status --short"];
   const commitHash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
   const progressEvents: WorkflowProgressEvent[] = [];
 
@@ -767,6 +767,152 @@ test("executeSpec root checkout mode uses the repo root and grants Docker access
     progressEvents.map((event) => [event.phase, event.summary])[0],
     ["setup", `checkout ready at ${repoRoot}`],
   );
+});
+
+test("executeSpec root checkout mode resumes from a dirty feature-branch checkout without failing the setup preflight", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const commitHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const savedRunId = "root-resume-run";
+
+  await execFile("git", ["checkout", "-b", "feature/demo"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "DIRTY.txt"), "in progress\n", "utf8");
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "reviewing",
+      currentIteration: 1,
+      runId: savedRunId,
+      checkoutMode: "root",
+      worktreePath: repoRoot,
+      lastCommit: commitHash,
+      updatedAt: new Date("2026-04-10T09:00:00.000Z").toISOString(),
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await writeArtifactJson(paths, spec.specId, savedRunId, "understander-1", {
+    role: "understander",
+    turnId: "understander:root-resume-run",
+    threadId: "saved-understander",
+    output: {
+      summary: "Resume from the dirty root checkout.",
+      repoPath: repoRoot,
+      worktreePath: repoRoot,
+      checkoutMode: "root",
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Continue from the existing dirty checkout state."],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    },
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+
+  await writeArtifactJson(paths, spec.specId, savedRunId, "implementer-1", {
+    role: "implementer",
+    turnId: "implementer:root-resume-run",
+    threadId: "saved-implementer",
+    output: {
+      summary: "Resume from the already-created candidate commit.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Resume artifact only.",
+      concerns: [],
+    },
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+
+  const fakeCodex = new FakeCodex([
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Resume verification is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: false,
+      resume: true,
+      specFilters: [],
+      checkoutMode: "root",
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      publishApprovedSpec: async (_repoPath, _spec, _summary, _candidateCommit) => ({
+        branch: _spec.branchInstructions.createBranch,
+        remote: "origin",
+        prNumber: 17,
+        prUrl: "https://example.test/pr/17",
+        prCreated: false,
+        draft: true,
+        labels: ["Prototype"],
+      }),
+      runVerificationCommands: async () => ({
+        repoPath: repoRoot,
+        featureBranch: "feature/demo",
+        startingBranch: "feature/demo",
+        startingCommit: commitHash,
+        restoredBranch: "feature/demo",
+        commands: [
+          {
+            command: "git status --short",
+            exitCode: 0,
+            stdout: " M DIRTY.txt\n",
+            stderr: "",
+          },
+        ],
+        summary: "Stubbed resume verification.",
+        succeeded: true,
+      }),
+    }),
+  );
+
+  assert.equal(outcome.status, "done");
+  const { stdout: branchName } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
+  assert.equal(branchName.trim(), "feature/demo");
+  assert.equal(await fs.readFile(path.join(repoRoot, "DIRTY.txt"), "utf8"), "in progress\n");
 });
 
 test("executeSpec normalizes implementer changedFiles to branch-wide diff before validation", async () => {
