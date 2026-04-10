@@ -14,6 +14,7 @@ import {
   ensureSpecWorktree,
   initialRunState,
   listRunStates,
+  markSpecDone,
   publishApprovedSpec,
   renderPullRequestBody,
   validateImplementationCandidate,
@@ -192,6 +193,55 @@ test("listRunStates normalizes legacy state without rewriting the file", async (
   assert.equal(states[0]?.stateVersion, 2);
   assert.equal(states[0]?.threads.planningSpec, "legacy-thread");
   assert.equal(await fs.readFile(statePath, "utf8"), legacyRaw);
+});
+
+test("markSpecDone converts an existing failed state into done and records a manual done report", async () => {
+  const { paths, spec } = await createRuntimeFixture();
+  const statePath = path.join(paths.stateRoot, `${spec.specId}.json`);
+
+  await fs.writeFile(
+    statePath,
+    `${JSON.stringify(
+      {
+        stateVersion: 2,
+        specId: spec.specId,
+        specRel: spec.relFromSpecs,
+        status: "failed",
+        currentIteration: 2,
+        runId: "run-1",
+        worktreePath: "/tmp/worktree",
+        lastCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        lastError: "stuck in review",
+        updatedAt: "2026-04-07T09:00:00.000Z",
+        threads: {},
+        threadPolicies: {},
+        legacyDoneDetected: false,
+        invalidationReason: "earlier plan invalidation",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const reportPath = await markSpecDone(paths, spec, "Manually marked done outside Ralph.");
+  const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+    status: string;
+    currentIteration: number;
+    lastCommit?: string;
+    lastError?: string;
+    invalidationReason?: string;
+  };
+  const report = await fs.readFile(reportPath, "utf8");
+
+  assert.equal(state.status, "done");
+  assert.equal(state.currentIteration, 2);
+  assert.equal(state.lastCommit, undefined);
+  assert.equal(state.lastError, undefined);
+  assert.equal(state.invalidationReason, undefined);
+  assert.match(report, /# Done: 1001-example/);
+  assert.match(report, /Commit: manual/);
+  assert.match(report, /Manually marked done outside Ralph\./);
 });
 
 test("ensureSpecWorktree reuses an existing feature branch without resetting it", async () => {

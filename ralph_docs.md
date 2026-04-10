@@ -102,6 +102,7 @@ Provides the public CLI:
 - `status`
 - `inspect`
 - `create-spec`
+- `mark-done`
 
 It parses command-line flags, loads specs, resolves `--to` bounded runs, creates runtime directories for real runs, and calls `executeSpec(...)`.
 
@@ -447,6 +448,14 @@ This command creates a new markdown file under `specs/` and prepopulates it with
 - recommended sections that help produce better execution packets and reviews
 - placeholder branch instructions and verification blocks
 
+### Mark a spec done manually
+
+```bash
+npm run dev -- mark-done 1001-demo
+```
+
+Use this when a spec was resolved outside Ralph and you want future runs to skip it. The command sets the persisted run state to `done`, clears prior failure/invalidation context for that spec, and writes a manual report under `.ralph/reports/done/`.
+
 ### Installed CLI Usage
 
 If you want the cleaner command form outside the repo wrapper:
@@ -459,6 +468,7 @@ ralph --dry-run
 ralph --dryrun
 ralph --to 1003
 ralph 1001-demo
+ralph mark-done 1001-demo
 ralph status
 ralph inspect 1001-demo.md
 ralph create-spec area/1235-follow-up-spec.md

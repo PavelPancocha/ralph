@@ -137,6 +137,13 @@ test("parseArgs accepts --resume for checkpointed reruns", () => {
   assert.equal(parsed.resume, true);
 });
 
+test("parseArgs accepts mark-done with an explicit target", () => {
+  const parsed = parseArgs(["mark-done", "1001-demo"]);
+  assert.equal(parsed.parseError, undefined);
+  assert.equal(parsed.command, "mark-done");
+  assert.equal(parsed.markDoneTarget, "1001-demo");
+});
+
 test("parseArgs leaves model unset when --model is omitted so smart role policy can decide", () => {
   const parsed = parseArgs(["run", "1001-demo"]);
   assert.equal(parsed.model, undefined);
@@ -174,7 +181,7 @@ test("runCommand prints help for --help", async () => {
 
   assert.match(logOutput, /Usage:\s+ralph \[run\] \[spec-filter\.\.\.\] \[options\]/);
   assert.match(logOutput, /--dry-run, --dryrun/);
-  assert.match(logOutput, /Commands:\s+run, status, inspect, create-spec/);
+  assert.match(logOutput, /Commands:\s+run, status, inspect, create-spec, mark-done/);
 });
 
 test("create-spec scaffolds a spec with required and recommended sections", async () => {
@@ -216,6 +223,40 @@ test("create-spec scaffolds a spec with required and recommended sections", asyn
   assert.match(created, /^## Scope \(In\)$/m);
   assert.match(created, /^## Boundaries \(Out, No Overlap\)$/m);
   assert.match(created, /^## Commit Requirements$/m);
+});
+
+test("runCommand mark-done updates state and writes a done report for the selected spec", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-mark-done-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+
+  let logOutput = "";
+  const originalLog = console.log;
+  const previousCwd = process.cwd();
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(parseArgs(["mark-done", "1001-one"]));
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+    console.log = originalLog;
+  }
+
+  const statePath = path.join(tempRoot, ".ralph", "state", "1001-one.json");
+  const reportPath = path.join(tempRoot, ".ralph", "reports", "done", "1001-one.md");
+  const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { status: string; lastCommit?: string; lastError?: string };
+  const report = await fs.readFile(reportPath, "utf8");
+
+  assert.equal(state.status, "done");
+  assert.equal(state.lastCommit, undefined);
+  assert.equal(state.lastError, undefined);
+  assert.match(report, /# Done: 1001-one/);
+  assert.match(report, /Commit: manual/);
+  assert.match(report, /Manually marked done outside Ralph\./);
+  assert.match(logOutput, /Marked 1001-one as done\./);
 });
 
 test("runCommand streams spec-indexed progress lines and log paths during run", async () => {

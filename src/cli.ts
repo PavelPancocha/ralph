@@ -12,6 +12,7 @@ import {
   defaultWorkspaceRoot,
   ensureRuntimePaths,
   listRunStates,
+  markSpecDone,
   peekRunState,
   runEventLogPath,
   runtimeSummary,
@@ -19,7 +20,7 @@ import {
 import { createSampleSpecFile, discoverSpecPaths, parseSpecFile } from "./specs.js";
 
 export interface ParsedArgs {
-  command: "run" | "status" | "inspect" | "create-spec" | "help";
+  command: "run" | "status" | "inspect" | "create-spec" | "mark-done" | "help";
   specFilters: string[];
   workspaceRoot: string | undefined;
   model: string | undefined;
@@ -29,6 +30,7 @@ export interface ParsedArgs {
   toSpec: string | undefined;
   inspectTarget: string | undefined;
   createSpecTarget: string | undefined;
+  markDoneTarget?: string;
   parseError?: string;
 }
 
@@ -70,8 +72,9 @@ export function renderHelpText(): string {
     "       ralph status",
     "       ralph inspect <spec-path>",
     "       ralph create-spec <spec-path>",
+    "       ralph mark-done <spec>",
     "",
-    "Commands: run, status, inspect, create-spec",
+    "Commands: run, status, inspect, create-spec, mark-done",
     "Options:",
     "  --dry-run, --dryrun        Preview matching specs without running Codex",
     "  --to <spec>                Run sequentially through the target spec, starting at the first not-done spec",
@@ -120,14 +123,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const [firstToken, ...remainingTokens] = argv;
   const helpRequested = argv.some((token) => isHelpToken(token));
   const hasExplicitCommand =
-    firstToken === "run" || firstToken === "status" || firstToken === "inspect" || firstToken === "create-spec";
+    firstToken === "run" ||
+    firstToken === "status" ||
+    firstToken === "inspect" ||
+    firstToken === "create-spec" ||
+    firstToken === "mark-done";
   let parseError =
     firstToken && !helpRequested && !hasExplicitCommand && !firstToken.startsWith("--") && !looksLikeSpecFilter(firstToken)
       ? `Unknown command: ${firstToken}`
       : undefined;
   const command: ParsedArgs["command"] = helpRequested
     ? "help"
-    : firstToken === "status" || firstToken === "inspect" || firstToken === "create-spec"
+    : firstToken === "status" || firstToken === "inspect" || firstToken === "create-spec" || firstToken === "mark-done"
       ? firstToken
       : "run";
   const rest = hasExplicitCommand ? remainingTokens : parseError ? remainingTokens : argv;
@@ -204,6 +211,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.createSpecTarget = token;
       continue;
     }
+    if (args.command === "mark-done" && !args.markDoneTarget) {
+      args.markDoneTarget = token;
+      continue;
+    }
     if (token.startsWith("--")) {
       parseError ??= `Unknown option: ${token}`;
       continue;
@@ -268,6 +279,27 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     }
     const absolute = await createSampleSpecFile(projectRoot, parsed.createSpecTarget);
     console.log(`Created ${path.relative(projectRoot, absolute).replaceAll(path.sep, "/")}`);
+    return 0;
+  }
+
+  if (parsed.command === "mark-done") {
+    if (!parsed.markDoneTarget) {
+      console.error("mark-done requires a spec path or id like 1001-example.md");
+      return 1;
+    }
+    const specPaths = await discoverSpecPaths(path.join(projectRoot, "specs"));
+    const matchingTargets = specPaths.filter((specPath) => specPath.includes(parsed.markDoneTarget as string));
+    if (matchingTargets.length === 0) {
+      console.error(`No specs matched ${parsed.markDoneTarget}.`);
+      return 1;
+    }
+    if (matchingTargets.length > 1) {
+      console.error(`${parsed.markDoneTarget} is ambiguous: ${matchingTargets.join(", ")}`);
+      return 1;
+    }
+    const spec = await parseSpecFile(projectRoot, workspaceRoot, matchingTargets[0]!);
+    await markSpecDone(paths, spec, "Manually marked done outside Ralph.");
+    console.log(`Marked ${spec.specId} as done.`);
     return 0;
   }
 

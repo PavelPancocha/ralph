@@ -280,7 +280,7 @@ export async function saveDoneReport(
   paths: RuntimePaths,
   spec: SpecDocument,
   summary: string,
-  candidateCommit: string,
+  candidateCommit?: string,
 ): Promise<string> {
   const doneDir = path.join(paths.reportsRoot, "done");
   await fs.mkdir(doneDir, { recursive: true });
@@ -289,7 +289,7 @@ export async function saveDoneReport(
     `# Done: ${spec.specId}`,
     "",
     `Spec: ${spec.relFromSpecs}`,
-    `Commit: ${candidateCommit}`,
+    `Commit: ${candidateCommit ?? "manual"}`,
     "",
     summary,
     "",
@@ -1041,6 +1041,24 @@ export async function listRunStates(paths: RuntimePaths): Promise<RunState[]> {
   }
   states.sort((a, b) => a.specId.localeCompare(b.specId));
   return states;
+}
+
+export async function markSpecDone(
+  paths: RuntimePaths,
+  spec: SpecDocument,
+  summary: string,
+  candidateCommit?: string,
+): Promise<string> {
+  const state = (await loadRunState(paths, spec.specId)) ?? initialRunState(spec, false);
+  state.specRel = spec.relFromSpecs;
+  state.status = "done";
+  state.lastCommit = candidateCommit;
+  state.lastError = undefined;
+  state.updatedAt = new Date().toISOString();
+  state.legacyDoneDetected = false;
+  state.invalidationReason = undefined;
+  await saveRunState(paths, state);
+  return saveDoneReport(paths, spec, summary, candidateCommit);
 }
 
 export function initialRunState(spec: SpecDocument, legacyDoneDetected: boolean): RunState {

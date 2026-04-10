@@ -127,6 +127,9 @@ npm run dev -- inspect area/1235-follow-up-spec.md
 # Create a new sample spec
 npm run dev -- create-spec area/1234-sample-feature.md
 
+# Mark a spec done manually
+npm run dev -- mark-done 1001-demo
+
 # Show runtime state
 npm run dev -- status
 
@@ -151,6 +154,7 @@ ralph --dryrun
 ralph --to 1003
 ralph --resume
 ralph 1001-demo
+ralph mark-done 1001-demo
 ralph status
 ralph inspect 1001-demo.md
 ralph create-spec area/1234-sample-feature.md
@@ -186,6 +190,7 @@ When a spec is approved, Ralph does not stop at the local commit anymore. It ent
 Ralph skips specs that are already done before execution and logs them explicitly.
 Ralph also stops on the first failed spec instead of continuing, because the backlog is typically dependency-ordered and later specs usually depend on earlier ones succeeding.
 `--to <spec>` runs sequentially through the ordered backlog up to the matching target spec and starts from the first spec in that bounded range that is not already done.
+`mark-done <spec>` marks one resolved spec as done manually, clears any persisted failure/invalidation state for that spec, and writes a manual done report so later runs skip it cleanly.
 If a spec in that rerun range has already failed once, Ralph seeds the next attempt from the stored `lastError` so the rerun starts from the prior failure context instead of a blank planning pass. The first implementation and review pass on that retry use the stronger model tier instead of the cheap first-pass tier.
 
 `--resume` continues a previously started spec run from the latest feasible checkpoint instead of replaying the whole workflow from scratch. Ralph prefers the most advanced saved stage it can reconstruct from the run state and artifacts, restores the saved planning context when it is available, and then continues from there with the existing thread history when the saved policy still matches. The durable checkpoint pointer is only advanced after a new structured artifact is written, so an early setup failure does not make Ralph forget the last resumable run. It also prints a small checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or had to fall back to a fresh run.
