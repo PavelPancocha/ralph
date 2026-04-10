@@ -5,7 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-import type { RalphRunOptions, SupervisorOutcome, WorkflowProgressEvent } from "./types.js";
+import type { CheckoutMode, RalphRunOptions, SupervisorOutcome, WorkflowProgressEvent } from "./types.js";
 import { executeSpec } from "./workflow.js";
 import {
   buildRuntimePaths,
@@ -26,6 +26,7 @@ export interface ParsedArgs {
   workspaceRoot: string | undefined;
   specRoot?: string | undefined;
   model: string | undefined;
+  checkoutMode?: CheckoutMode;
   maxIterations: number;
   dryRun: boolean;
   resume?: boolean;
@@ -83,6 +84,7 @@ export function renderHelpText(): string {
     "  --resume                   Resume from the latest feasible checkpoint when possible",
     "  --workspace-root <path>    Override the workspace root",
     "  --spec-root <path>         Override the spec root (relative to Ralph project root or absolute)",
+    "  --checkout-mode <worktree|root>  Choose isolated worktrees (default) or the repo root checkout",
     "  --model <model>            Force all Ralph-managed roles to one model",
     "  --max-iterations <n>       Limit the internal review/fix loop",
     "  -h, --help                 Show this help",
@@ -176,6 +178,19 @@ export function parseArgs(argv: string[]): ParsedArgs {
         parseError ??= "Missing --spec-root value";
       } else {
         args.specRoot = specRootValue;
+        index += 1;
+      }
+      continue;
+    }
+    if (token === "--checkout-mode") {
+      const checkoutModeValue = rest[index + 1];
+      if (!checkoutModeValue || checkoutModeValue.startsWith("--")) {
+        parseError ??= "Missing --checkout-mode value";
+      } else if (checkoutModeValue === "worktree" || checkoutModeValue === "root") {
+        args.checkoutMode = checkoutModeValue;
+        index += 1;
+      } else {
+        parseError ??= `Invalid --checkout-mode value: ${checkoutModeValue}`;
         index += 1;
       }
       continue;
@@ -376,6 +391,16 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     return 1;
   }
 
+  const checkoutMode = parsed.checkoutMode ?? "worktree";
+  if (checkoutMode === "root" && parsed.toSpec) {
+    console.error("`--checkout-mode root` does not support `--to`; root mode is limited to a single explicit spec run.");
+    return 1;
+  }
+  if (checkoutMode === "root" && selected.length !== 1) {
+    console.error("`--checkout-mode root` requires a single spec selection; narrow the filters so only one spec will run.");
+    return 1;
+  }
+
   const options: RalphRunOptions = {
     workspaceRoot,
     projectRoot,
@@ -384,6 +409,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     dryRun: parsed.dryRun,
     resume: parsed.resume ?? false,
     specFilters: parsed.specFilters,
+    checkoutMode,
   };
   const executeSpecFn = deps.executeSpec ?? executeSpec;
 

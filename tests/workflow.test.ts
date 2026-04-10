@@ -505,6 +505,7 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
       summary: "Edit README and verify with git status.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -641,6 +642,133 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   assert.match(doneReport, new RegExp(commitHash));
 });
 
+test("executeSpec root checkout mode uses the repo root and grants Docker access only to implementer and reviewers", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  spec.verificationCommands = ["docker compose run --rm app pytest billing/tests/test_demo.py"];
+  const commitHash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, repoRoot),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Operate directly in the repo root checkout.",
+      repoPath: repoRoot,
+      worktreePath: repoRoot,
+      checkoutMode: "root",
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md from the repo root checkout."],
+      verificationCommands: ["docker compose run --rm app pytest billing/tests/test_demo.py"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Implemented change and committed it.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["docker compose run --rm app pytest billing/tests/test_demo.py"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Docker-backed verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 1,
+      dryRun: false,
+      specFilters: [],
+      checkoutMode: "root",
+    },
+    spec,
+    {
+      ...fakeWorkflowDeps(fakeCodex, {
+        publishApprovedSpec: async (_repoPath, _spec, _summary, _candidateCommit) => ({
+          branch: _spec.branchInstructions.createBranch,
+          remote: "origin",
+          prNumber: 9,
+          prUrl: "https://example.test/pr/9",
+          prCreated: true,
+          draft: true,
+          labels: ["Prototype", "work in progress"],
+        }),
+      }),
+      validateImplementationCandidate: async () => null,
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+    },
+  );
+
+  assert.equal(outcome.status, "done");
+  await assert.rejects(fs.access(path.join(paths.worktreesRoot, spec.specId)));
+
+  const implementerThread = fakeCodex.threadConfigs[5];
+  const correctnessReviewerThread = fakeCodex.threadConfigs[6];
+  const testsReviewerThread = fakeCodex.threadConfigs[7];
+  const supervisorThread = fakeCodex.threadConfigs[3];
+
+  assert.deepEqual(
+    implementerThread?.options?.additionalDirectories?.sort(),
+    ["/var/run", path.join(repoRoot, ".git")].sort(),
+  );
+  assert.deepEqual(
+    correctnessReviewerThread?.options?.additionalDirectories?.sort(),
+    ["/var/run", path.join(repoRoot, ".git")].sort(),
+  );
+  assert.deepEqual(
+    testsReviewerThread?.options?.additionalDirectories?.sort(),
+    ["/var/run", path.join(repoRoot, ".git")].sort(),
+  );
+  assert.deepEqual(supervisorThread?.options?.additionalDirectories, [path.join(repoRoot, ".git")]);
+
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  assert.equal(state.worktreePath, repoRoot);
+  assert.equal(state.checkoutMode, "root");
+  assert.match(state.threadPolicies.implementer ?? "", /"checkoutMode":"root"/);
+  assert.deepEqual(
+    progressEvents.map((event) => [event.phase, event.summary])[0],
+    ["setup", `checkout ready at ${repoRoot}`],
+  );
+});
+
 test("executeSpec normalizes implementer changedFiles to branch-wide diff before validation", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
@@ -666,6 +794,7 @@ test("executeSpec normalizes implementer changedFiles to branch-wide diff before
       summary: "Use existing branch commit for the candidate.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -764,6 +893,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
   const supervisorPolicy = JSON.stringify({
     role: "supervisor",
     model: "gpt-5.4",
+    checkoutMode: "worktree",
     workingDirectory: path.resolve(expectedWorktreePath),
     additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
       .map((dir) => path.resolve(dir))
@@ -783,6 +913,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
       currentIteration: 1,
       runId: savedRunId,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       lastCommit: commitHash,
       updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
       threads: {
@@ -794,6 +925,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
         understander: JSON.stringify({
           role: "understander",
           model: "gpt-5.4",
+          checkoutMode: "worktree",
           workingDirectory: path.resolve(expectedWorktreePath),
           additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
             .map((dir) => path.resolve(dir))
@@ -805,6 +937,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
         implementer: JSON.stringify({
           role: "implementer",
           model: "gpt-5.4-mini",
+          checkoutMode: "worktree",
           workingDirectory: path.resolve(expectedWorktreePath),
           additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
             .map((dir) => path.resolve(dir))
@@ -827,6 +960,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
       summary: "Cached understanding packet.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -953,6 +1087,7 @@ test("executeSpec keeps the prior durable runId when a resumed attempt fails bef
       currentIteration: 1,
       runId: priorRunId,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       lastCommit: undefined,
       lastError: "Previous run failed before checkpointing.",
       updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
@@ -1010,6 +1145,7 @@ test("executeSpec reuses restored planning context after resumed implementation 
       currentIteration: 1,
       runId: savedRunId,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       lastCommit: firstRetryCommit,
       lastError: "Previous attempt needs targeted fixes.",
       updatedAt: new Date("2026-04-09T09:00:00.000Z").toISOString(),
@@ -1072,6 +1208,7 @@ test("executeSpec reuses restored planning context after resumed implementation 
       summary: "Saved understanding packet.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1122,6 +1259,7 @@ test("executeSpec reuses restored planning context after resumed implementation 
       summary: "Rebuilt understanding from restored strategy.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1243,6 +1381,7 @@ test("executeSpec always includes correctness and tests reviewers when the super
       summary: "Edit README and verify with git status.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1349,6 +1488,7 @@ test("executeSpec reruns only targeted reviewers at stronger policy when the rev
       summary: "Edit README and verify with git status.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1474,6 +1614,7 @@ test("executeSpec persists failed state when an escalated follow-up reviewer ret
       summary: "Edit README and verify with git status.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1575,6 +1716,7 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
       summary: "First pass plan.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1613,6 +1755,7 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
       summary: "Second pass plan.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1736,6 +1879,7 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
       summary: "First plan targets the wrong file.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1781,6 +1925,7 @@ test("executeSpec clears reviewer state when recheck invalidates the plan", asyn
       summary: "Second plan targets the correct file.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -1949,6 +2094,7 @@ test("executeSpec fails after maxIterations is exhausted on needs_fix without ca
       summary: "Only pass.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2029,6 +2175,7 @@ test("executeSpec throws when a reviewer reports the wrong reviewer identity", a
       summary: "Single pass.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2106,6 +2253,7 @@ test("executeSpec warns and drops resume state when the SDK returns a null threa
         summary: "Single pass.",
         repoPath: repoRoot,
         worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
         featureBranch: "feature/demo",
         targetFiles: ["README.md"],
         contextFiles: ["README.md"],
@@ -2204,6 +2352,7 @@ test("executeSpec fails when the final supervisor outcome is not done", async ()
       summary: "Edit README and verify with git status.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2274,6 +2423,7 @@ test("executeSpec normalizes legacy run state and starts fresh threads when poli
       currentIteration: 1,
       runId: "legacy-run",
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       updatedAt: "2026-04-07T09:00:00.000Z",
       threads: {
         planningSpec: "legacy-planning-spec",
@@ -2296,6 +2446,7 @@ test("executeSpec normalizes legacy run state and starts fresh threads when poli
       summary: "Single pass.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2367,6 +2518,7 @@ test("executeSpec resumes a persisted thread when the saved policy matches", asy
   const planningSpecPolicy = JSON.stringify({
     role: "planning_spec",
     model: "gpt-5.4-mini",
+    checkoutMode: "worktree",
     workingDirectory: path.resolve(expectedWorktreePath),
     additionalDirectories: additionalDirectories.map((dir) => path.resolve(dir)).sort(),
     sandboxMode: "read-only",
@@ -2384,6 +2536,7 @@ test("executeSpec resumes a persisted thread when the saved policy matches", asy
       currentIteration: 0,
       runId: "saved-run",
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       updatedAt: "2026-04-07T09:00:00.000Z",
       threads: {
         planningSpec: "saved-planning-spec",
@@ -2408,6 +2561,7 @@ test("executeSpec resumes a persisted thread when the saved policy matches", asy
       summary: "Single pass.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2480,6 +2634,7 @@ test("executeSpec starts a fresh thread when persisted thread policy metadata mi
       currentIteration: 0,
       runId: "saved-run",
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       updatedAt: "2026-04-07T09:00:00.000Z",
       threads: {
         planningSpec: "stale-planning-spec",
@@ -2504,6 +2659,7 @@ test("executeSpec starts a fresh thread when persisted thread policy metadata mi
       summary: "Single pass.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2575,6 +2731,7 @@ test("executeSpec keeps mismatched persisted thread state when fresh replacement
       currentIteration: 0,
       runId: "saved-run",
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       updatedAt: "2026-04-07T09:00:00.000Z",
       threads: {
         planningSpec: "stale-planning-spec",
@@ -2634,6 +2791,7 @@ test("executeSpec loads persisted invalidation reason and replans at escalated p
       currentIteration: 1,
       runId: "prior-run",
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       updatedAt: "2026-04-07T09:00:00.000Z",
       threads: {},
       threadPolicies: {},
@@ -2655,6 +2813,7 @@ test("executeSpec loads persisted invalidation reason and replans at escalated p
       summary: "Single pass after restart.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2740,6 +2899,7 @@ test("executeSpec keeps invalidation reason persisted after replanning resumes",
       summary: "First plan targets the wrong file.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2835,6 +2995,7 @@ test("executeSpec seeds reruns from the previous lastError and escalates the fir
       currentIteration: 1,
       runId: "prior-run",
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       lastCommit: commitHash,
       lastError,
       updatedAt: "2026-04-09T09:00:00.000Z",
@@ -2857,6 +3018,7 @@ test("executeSpec seeds reruns from the previous lastError and escalates the fir
       summary: "Rerun starts from the previous failure context.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -2952,6 +3114,7 @@ test("executeSpec rejects out-of-plan review lead follow-up requests", async () 
       summary: "Single pass.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -3017,6 +3180,7 @@ test("executeSpec sends recheck the real reviewer reports plus the review lead s
       summary: "Single pass.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],
@@ -3121,6 +3285,7 @@ test("executeSpec passes host verification output into the recheck prompt", asyn
       summary: "Single pass.",
       repoPath: repoRoot,
       worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
       featureBranch: "feature/demo",
       targetFiles: ["README.md"],
       contextFiles: ["README.md"],

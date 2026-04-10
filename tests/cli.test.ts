@@ -149,6 +149,12 @@ test("parseArgs accepts --spec-root for custom spec directories", () => {
   assert.equal(parsed.specRoot, "../zemtu/docs/plans/payment-toolbox/specs");
 });
 
+test("parseArgs accepts --checkout-mode root", () => {
+  const parsed = parseArgs(["run", "--checkout-mode", "root"]);
+  assert.equal(parsed.parseError, undefined);
+  assert.equal(parsed.checkoutMode, "root");
+});
+
 test("parseArgs accepts mark-done with an explicit target", () => {
   const parsed = parseArgs(["mark-done", "1001-demo"]);
   assert.equal(parsed.parseError, undefined);
@@ -177,6 +183,12 @@ test("parseArgs rejects --spec-root when the explicit value is missing", () => {
   assert.equal(parseArgs(["run", "--spec-root", "--dry-run"]).parseError, "Missing --spec-root value");
 });
 
+test("parseArgs rejects invalid --checkout-mode values", () => {
+  assert.equal(parseArgs(["run", "--checkout-mode"]).parseError, "Missing --checkout-mode value");
+  assert.equal(parseArgs(["run", "--checkout-mode", "--dry-run"]).parseError, "Missing --checkout-mode value");
+  assert.equal(parseArgs(["run", "--checkout-mode", "repo"]).parseError, "Invalid --checkout-mode value: repo");
+});
+
 test("parseArgs rejects unknown long options instead of treating them as spec filters", () => {
   const parsed = parseArgs(["run", "--dryrn"]);
   assert.equal(parsed.parseError, "Unknown option: --dryrn");
@@ -198,7 +210,57 @@ test("runCommand prints help for --help", async () => {
 
   assert.match(logOutput, /Usage:\s+ralph \[run\] \[spec-filter\.\.\.\] \[options\]/);
   assert.match(logOutput, /--dry-run, --dryrun/);
+  assert.match(logOutput, /--checkout-mode <worktree\|root>/);
   assert.match(logOutput, /Commands:\s+run, status, inspect, create-spec, mark-done/);
+});
+
+test("runCommand rejects root checkout mode when more than one spec would run", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-root-mode-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+  await writeRunnableSpec(tempRoot, "1002-two.md", "1002 - Two");
+
+  let errorOutput = "";
+  const originalError = console.error;
+  const previousCwd = process.cwd();
+  console.error = (message?: unknown) => {
+    errorOutput += `${String(message)}\n`;
+  };
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(parseArgs(["run", "--checkout-mode", "root"]));
+    assert.equal(exitCode, 1);
+  } finally {
+    process.chdir(previousCwd);
+    console.error = originalError;
+  }
+
+  assert.match(errorOutput, /checkout-mode root/i);
+  assert.match(errorOutput, /single spec/i);
+});
+
+test("runCommand rejects --to when root checkout mode is requested", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-root-to-"));
+  await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
+  await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+
+  let errorOutput = "";
+  const originalError = console.error;
+  const previousCwd = process.cwd();
+  console.error = (message?: unknown) => {
+    errorOutput += `${String(message)}\n`;
+  };
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(parseArgs(["run", "--checkout-mode", "root", "--to", "1001"]));
+    assert.equal(exitCode, 1);
+  } finally {
+    process.chdir(previousCwd);
+    console.error = originalError;
+  }
+
+  assert.match(errorOutput, /checkout-mode root/i);
+  assert.match(errorOutput, /--to/);
 });
 
 test("create-spec scaffolds a spec with required and recommended sections", async () => {

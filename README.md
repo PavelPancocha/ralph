@@ -1,6 +1,6 @@
 # Ralph
 
-Ralph is a spec-driven development runner built around the official Codex SDK. It reads markdown specs from `specs/` by default, or from a custom `--spec-root`, creates an isolated git worktree per spec, and executes a supervised multi-agent loop until the spec is either completed or fails review.
+Ralph is a spec-driven development runner built around the official Codex SDK. It reads markdown specs from `specs/` by default, or from a custom `--spec-root`, uses an isolated git worktree per spec by default, and executes a supervised multi-agent loop until the spec is either completed or fails review. For repos whose Docker setup is not worktree-safe, Ralph also supports a single-spec `--checkout-mode root` override that runs directly in the repository root checkout.
 
 This repository is the v2 rewrite. The old Python runner still exists in the tree, but the active implementation documented here is the Node/TypeScript CLI under [`src/`](./src).
 
@@ -15,7 +15,7 @@ For each spec, Ralph runs a fixed role pipeline:
 1. `planning_spec`, `planning_repo`, and `planning_risks` build separate read-only views of the spec, repository, and likely failure surface.
 2. `supervisor` synthesizes those views into a strategy and optional extra review coverage.
 3. `understander` turns that strategy into the concrete execution packet.
-4. `implementer` makes the change in an isolated worktree and commits it. Ralph then validates the candidate against the full branch diff from `merge-base..HEAD`, not just the last commit.
+4. `implementer` makes the change in the active checkout and commits it. That checkout is an isolated worktree by default, or the repo root when `--checkout-mode root` is used. Ralph then validates the candidate against the full branch diff from `merge-base..HEAD`, not just the last commit.
 5. Topic reviewers always run `correctness` and `tests`, with optional `security` and `performance` when the supervisor asks for them. The `tests` reviewer is constrained to affected-module tests derived from changed files and avoids broad suite runs.
 6. `review_lead` synthesizes the review set and can request one targeted stronger re-review when a topic is still ambiguous or high risk.
 7. Ralph runs the spec's verification commands on the host against the feature branch, then restores the previous branch and passes the transcript into recheck.
@@ -27,7 +27,7 @@ The runner is file-first and local-first:
 
 - Specs stay in `specs/` by default, or in a custom `--spec-root`
 - Runtime state stays in `.ralph/`
-- Each spec gets a dedicated worktree under `.ralph/worktrees/`
+- Each spec gets a dedicated worktree under `.ralph/worktrees/` unless `--checkout-mode root` is used
 - Human-readable and machine-readable artifacts are written to disk
 
 ## CLI Usage
@@ -113,6 +113,9 @@ npm run dev -- --workspace-root /path/to/workspace
 
 # Override spec root
 npm run dev -- --spec-root ../zemtu/docs/plans/payment-toolbox/specs
+
+# Run one spec directly in the repo root checkout
+npm run dev -- 2003-stop-runtime-effective-date-usage --checkout-mode root
 
 # Override all Ralph-managed roles to one model
 npm run dev -- --model gpt-5.4
@@ -205,7 +208,9 @@ If a spec in that rerun range has already failed once, Ralph seeds the next atte
 
 `--resume` continues a previously started spec run from the latest feasible checkpoint instead of replaying the whole workflow from scratch. Ralph prefers the most advanced saved stage it can reconstruct from the run state and artifacts, restores the saved planning context when it is available, and then continues from there with the existing thread history when the saved policy still matches. The durable checkpoint pointer is only advanced after a new structured artifact is written, so an early setup failure does not make Ralph forget the last resumable run. It also prints a small checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or had to fall back to a fresh run.
 
-`--dry-run` is truly read-only. It does not create worktrees, runtime state, event logs, artifacts, or `codex-home`. It only validates dry-run preconditions and prints what Ralph would do.
+`--checkout-mode worktree` is the default. `--checkout-mode root` is an explicit single-spec override for repos whose Docker or compose setup cannot run correctly from a Ralph worktree. Root mode rejects `--to` and multi-spec runs, requires a clean non-detached repo checkout, leaves the repo on the feature branch after setup, reuses the repo root itself as the active checkout, and exposes `/var/run` to implementer and reviewer sandboxes when the spec's verification commands reference Docker.
+
+`--dry-run` is truly read-only. It does not create worktrees, switch a repo root checkout, create runtime state, write event logs or artifacts, or seed `codex-home`. It only validates dry-run preconditions and prints what Ralph would do.
 
 When Ralph creates or reuses a real spec worktree, it prunes stale git worktree registrations first. That keeps interrupted or manually deleted worktrees from blocking the next run.
 
@@ -361,7 +366,7 @@ Important outputs:
 - `.ralph/reports/done/<spec-id>.md`
   Final completion report for a successful spec.
 - `.ralph/worktrees/<spec-id>/`
-  Git worktree used for the spec run.
+  Git worktree used for the spec run when `--checkout-mode worktree` is active.
 
 When you use a non-default `--spec-root`, Ralph namespaces runtime state, artifacts, reports, and worktrees under `.ralph/spec-roots/<derived-id>/...` so different spec backlogs with the same `1001-...` ids do not collide.
 
@@ -371,7 +376,9 @@ Legacy `done/...` markers inside the selected spec root are still recognized as 
 
 ## Codex Hooks
 
-Ralph copies [`codex-support/`](./codex-support) into each active worktree as `.codex/`.
+Ralph copies [`codex-support/`](./codex-support) into each active checkout as `.codex/`.
+
+In `--checkout-mode root`, Ralph refuses to overwrite an existing user-owned `.codex/` directory. Root mode only proceeds when `.codex/` is absent or already marked as Ralph-managed.
 
 That bundle currently includes:
 
@@ -381,7 +388,7 @@ That bundle currently includes:
 - `hooks/post_tool_use_review.mjs`
 - `hooks/stop_continue.mjs`
 
-These hooks are intended to keep the workflow constrained and auditable inside the spec worktree.
+These hooks are intended to keep the workflow constrained and auditable inside the active checkout.
 
 ## Testing
 

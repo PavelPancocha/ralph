@@ -10,6 +10,7 @@ import {
   buildRuntimePaths,
   defaultCodexHome,
   ensureCodexHome,
+  prepareRootCheckout,
   ensureRuntimePaths,
   ensureSpecWorktree,
   initialRunState,
@@ -316,6 +317,75 @@ test("ensureSpecWorktree recreates a missing but still registered worktree", asy
   const recreatedPath = await ensureSpecWorktree(paths, spec, repoRoot);
   assert.equal(recreatedPath, worktreePath);
   await fs.access(path.join(worktreePath, ".codex", "hooks", "noop.mjs"));
+});
+
+test("prepareRootCheckout reuses an existing feature branch in the repo root and installs Ralph-managed codex support", async () => {
+  const { repoRoot, paths, spec, featureCommit } = await createRuntimeFixture();
+
+  const checkoutPath = await prepareRootCheckout(paths, spec, repoRoot);
+  const { stdout: branchName } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
+  const { stdout: headCommit } = await execFile("git", ["-C", repoRoot, "rev-parse", "HEAD"]);
+  const excludePath = path.join(repoRoot, ".git", "info", "exclude");
+  const excludeContents = await fs.readFile(excludePath, "utf8");
+
+  assert.equal(checkoutPath, repoRoot);
+  assert.equal(branchName.trim(), spec.branchInstructions.createBranch);
+  assert.equal(headCommit.trim(), featureCommit);
+  await fs.access(path.join(repoRoot, ".codex", "config.toml"));
+  await fs.access(path.join(repoRoot, ".codex", ".ralph-managed"));
+  assert.match(excludeContents, /(^|\n)\.codex\/(\n|$)/);
+});
+
+test("prepareRootCheckout creates a missing feature branch from the declared source branch", async () => {
+  const { repoRoot, paths, spec } = await createRuntimeFixture();
+  const rootOnlySpec = {
+    ...spec,
+    branchInstructions: {
+      ...spec.branchInstructions,
+      createBranch: "feature/root-only",
+    },
+  };
+
+  const checkoutPath = await prepareRootCheckout(paths, rootOnlySpec, repoRoot);
+  const { stdout: branchName } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
+  const { stdout: createdBranchHead } = await execFile("git", ["-C", repoRoot, "rev-parse", "HEAD"]);
+  const { stdout: sourceBranchHead } = await execFile("git", ["-C", repoRoot, "rev-parse", rootOnlySpec.branchInstructions.sourceBranch]);
+
+  assert.equal(checkoutPath, repoRoot);
+  assert.equal(branchName.trim(), rootOnlySpec.branchInstructions.createBranch);
+  assert.equal(createdBranchHead.trim(), sourceBranchHead.trim());
+});
+
+test("prepareRootCheckout fails fast on dirty repo state", async () => {
+  const { repoRoot, paths, spec } = await createRuntimeFixture();
+  await fs.writeFile(path.join(repoRoot, "DIRTY.txt"), "dirty\n", "utf8");
+
+  await assert.rejects(
+    () => prepareRootCheckout(paths, spec, repoRoot),
+    /clean repository/i,
+  );
+});
+
+test("prepareRootCheckout fails fast on detached HEAD", async () => {
+  const { repoRoot, paths, spec } = await createRuntimeFixture();
+  const { stdout: detachedCommit } = await execFile("git", ["-C", repoRoot, "rev-parse", "HEAD"]);
+  await execFile("git", ["-C", repoRoot, "checkout", "--detach", detachedCommit.trim()]);
+
+  await assert.rejects(
+    () => prepareRootCheckout(paths, spec, repoRoot),
+    /detached head/i,
+  );
+});
+
+test("prepareRootCheckout refuses to overwrite a user-managed .codex directory", async () => {
+  const { repoRoot, paths, spec } = await createRuntimeFixture();
+  await fs.mkdir(path.join(repoRoot, ".codex"), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, ".codex", "config.toml"), "model = \"user-owned\"\n", "utf8");
+
+  await assert.rejects(
+    () => prepareRootCheckout(paths, spec, repoRoot),
+    /not Ralph-managed/i,
+  );
 });
 
 test("runVerificationCommands checks out the feature branch in the main repo and restores the original branch", async () => {

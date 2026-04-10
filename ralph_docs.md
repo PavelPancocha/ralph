@@ -10,7 +10,8 @@ Ralph is a local spec runner that:
 
 - reads markdown specs from `specs/` by default, or from a custom `--spec-root`
 - resolves the target repository from `Repo:` and `Workdir:`
-- creates one isolated git worktree per spec
+- creates one isolated git worktree per spec by default
+- supports a single-spec `--checkout-mode root` override for repos whose Docker setup is not worktree-safe
 - runs a supervised multi-agent Codex workflow
 - stores runtime state and artifacts under `.ralph/`
 - marks successful specs with a done report under `.ralph/reports/done/`
@@ -32,7 +33,7 @@ For a runnable spec, Ralph executes this sequence:
 3. `understander`
    Reads the spec, repository, planning views, and supervisor strategy, then emits an `UnderstandingPacket`.
 4. `implementer`
-   Applies the change in the active worktree and emits an `ImplementationReport`.
+   Applies the change in the active checkout and emits an `ImplementationReport`.
 5. `reviewers`
    Review the candidate implementation. `correctness` and `tests` always run; `security` and `performance` are added when the supervisor requests them.
    The `tests` reviewer runs only affected-module tests derived from changed files and avoids broad/repo-wide suites during reviewer phase.
@@ -126,7 +127,8 @@ Responsible for:
 - writing per-run progress logs under `.ralph/runs/`
 - resolving repository paths from workspace-relative spec metadata
 - creating and reusing git worktrees
-- copying `codex-support/` into the worktree as `.codex/`
+- preparing the repo root checkout when `--checkout-mode root` is requested
+- copying `codex-support/` into the active checkout as `.codex/`
 - publishing approved branches and pull requests
 
 #### `src/prompts.ts`
@@ -161,7 +163,7 @@ It:
 
 Dry-run special case:
 
-- does not create worktrees
+- does not create worktrees or switch the repo root checkout
 - does not create `.ralph/state`, `.ralph/artifacts`, `.ralph/runs`, or `codex-home`
 - does not write event logs
 - only validates dry-run preconditions and prints what Ralph would do
@@ -283,6 +285,7 @@ Each state file also stores:
 
 - `currentIteration`
 - `runId`
+- `checkoutMode`
 - `worktreePath`
 - `lastCommit`
 - `lastError`
@@ -307,9 +310,9 @@ Important payloads:
 
 This is the main runtime shift from the old Ralph loop.
 
-## Worktree Behavior
+## Checkout Behavior
 
-Each spec gets a stable worktree path:
+Default mode is `--checkout-mode worktree`. Each spec gets a stable worktree path:
 
 ```text
 .ralph/worktrees/<spec-id>/
@@ -326,6 +329,16 @@ After worktree creation, Ralph copies `codex-support/` into:
 ```
 
 That gives every spec run its own local Codex hook/config bundle.
+
+`--checkout-mode root` is a single-spec override for repositories where Docker, bind mounts, or compose project naming make Ralph worktrees unusable. In this mode Ralph:
+
+- reuses the repository root itself as the active checkout
+- rejects `--to` and any multi-spec selection
+- requires a clean repository and refuses detached HEAD
+- checks out or creates the spec feature branch directly in the repo root
+- leaves the repo on that feature branch after setup and after the run
+- refuses to overwrite an existing user-owned `.codex/` directory in the repo root
+- exposes `/var/run` to implementer and reviewer sandboxes when the spec's verification commands reference Docker
 
 Candidate validation uses the full branch diff from `merge-base..HEAD`, not just the final commit, so multi-commit branches are judged as a branch rather than as one isolated patch commit.
 
@@ -413,9 +426,10 @@ npm run dev -- 1001-demo
 npm run dev -- --dry-run
 npm run dev -- --dryrun
 npm run dev -- --spec-root ../zemtu/docs/plans/payment-toolbox/specs --dry-run
+npm run dev -- 2003-stop-runtime-effective-date-usage --checkout-mode root
 ```
 
-Dry-run is read-only. It prints spec-indexed progress lines, but it does not create worktrees, state files, artifacts, or event logs.
+Dry-run is read-only. It prints spec-indexed progress lines, but it does not create worktrees, switch a repo root checkout, create state files, write artifacts, or write event logs.
 
 ### Run through a target spec
 

@@ -21,6 +21,8 @@ export type RoleName =
   | "review_lead"
   | "recheck";
 
+export type CheckoutMode = "worktree" | "root";
+
 export interface BranchInstructions {
   sourceBranch: string;
   createBranch: string;
@@ -112,6 +114,7 @@ export interface RunState {
     | "failed";
   currentIteration: number;
   runId: string | undefined;
+  checkoutMode?: CheckoutMode;
   worktreePath: string | undefined;
   lastCommit: string | undefined;
   lastError: string | undefined;
@@ -181,6 +184,7 @@ export interface UnderstandingPacket {
   summary: string;
   repoPath: string;
   worktreePath: string;
+  checkoutMode: CheckoutMode;
   featureBranch: string;
   targetFiles: string[];
   contextFiles: string[];
@@ -271,6 +275,7 @@ export interface RalphRunOptions {
   dryRun: boolean;
   resume?: boolean;
   specFilters: string[];
+  checkoutMode?: CheckoutMode;
 }
 
 export interface RoleExecutionOptions {
@@ -278,6 +283,7 @@ export interface RoleExecutionOptions {
   model: string;
   workingDirectory: string;
   additionalDirectories?: string[];
+  checkoutMode?: CheckoutMode;
   forceFreshThread?: boolean;
   sandboxMode: SandboxMode;
   approvalPolicy: ApprovalMode;

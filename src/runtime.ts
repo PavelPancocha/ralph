@@ -8,6 +8,7 @@ import { resolveSpecRoot, specRootRuntimeId } from "./spec-roots.js";
 import type {
   AgentThreadPolicies,
   AgentThreadRefs,
+  CheckoutMode,
   ImplementationReport,
   PublicationResult,
   ReviewFinding,
@@ -118,6 +119,10 @@ function normalizeIteration(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
+function normalizeCheckoutMode(value: unknown): CheckoutMode {
+  return value === "root" ? "root" : "worktree";
+}
+
 function normalizeRunState(raw: unknown, specIdFallback: string): RunState | null {
   if (!isRecord(raw)) {
     return null;
@@ -130,6 +135,7 @@ function normalizeRunState(raw: unknown, specIdFallback: string): RunState | nul
     status: normalizeStatus(raw.status),
     currentIteration: normalizeIteration(raw.currentIteration),
     runId: stringOrUndefined(raw.runId),
+    checkoutMode: normalizeCheckoutMode(raw.checkoutMode),
     worktreePath: stringOrUndefined(raw.worktreePath),
     lastCommit: stringOrUndefined(raw.lastCommit),
     lastError: stringOrUndefined(raw.lastError),
@@ -817,8 +823,8 @@ export async function publishApprovedSpec(
   };
 }
 
-async function ignoreWorktreePath(worktreePath: string, pattern: string): Promise<void> {
-  const excludePath = path.resolve(worktreePath, await readGitStdout(worktreePath, ["rev-parse", "--git-path", "info/exclude"]));
+async function ignoreCheckoutPath(checkoutPath: string, pattern: string): Promise<void> {
+  const excludePath = path.resolve(checkoutPath, await readGitStdout(checkoutPath, ["rev-parse", "--git-path", "info/exclude"]));
   const current = await fs.readFile(excludePath, "utf8").catch(() => "");
   const lines = current.split(/\r?\n/).filter((line) => line !== "");
   if (lines.includes(pattern)) {
@@ -829,11 +835,24 @@ async function ignoreWorktreePath(worktreePath: string, pattern: string): Promis
   await fs.writeFile(excludePath, `${prefix}${pattern}\n`, "utf8");
 }
 
-export async function installWorktreeCodexSupport(paths: RuntimePaths, worktreePath: string): Promise<void> {
+export async function installCheckoutCodexSupport(
+  paths: RuntimePaths,
+  checkoutPath: string,
+  strictOwnership = false,
+): Promise<void> {
   const source = path.join(paths.projectRoot, "codex-support");
-  const dest = path.join(worktreePath, ".codex");
+  const dest = path.join(checkoutPath, ".codex");
+  const markerPath = path.join(dest, ".ralph-managed");
+  if (strictOwnership && (await pathExists(dest)) && !(await pathExists(markerPath))) {
+    throw new Error(`Refusing to overwrite existing .codex in ${checkoutPath} because it is not Ralph-managed.`);
+  }
+  await ignoreCheckoutPath(checkoutPath, ".codex/");
   await copyDirectory(source, dest);
-  await ignoreWorktreePath(worktreePath, ".codex/");
+  await fs.writeFile(markerPath, "managed-by=ralph\n", "utf8");
+}
+
+export async function installWorktreeCodexSupport(paths: RuntimePaths, worktreePath: string): Promise<void> {
+  await installCheckoutCodexSupport(paths, worktreePath);
 }
 
 export async function runVerificationCommands(
@@ -935,8 +954,49 @@ export async function ensureSpecWorktree(
       spec.branchInstructions.sourceBranch,
     ]);
   }
-  await installWorktreeCodexSupport(paths, worktreePath);
+  await installCheckoutCodexSupport(paths, worktreePath);
   return worktreePath;
+}
+
+export async function prepareRootCheckout(
+  paths: RuntimePaths,
+  spec: SpecDocument,
+  repoPath: string,
+): Promise<string> {
+  const codexPath = path.join(repoPath, ".codex");
+  const codexMarkerPath = path.join(codexPath, ".ralph-managed");
+  if ((await pathExists(codexPath)) && !(await pathExists(codexMarkerPath))) {
+    throw new Error(`Refusing to overwrite existing .codex in ${repoPath} because it is not Ralph-managed.`);
+  }
+
+  const dirtyEntries = await readGitLines(repoPath, ["status", "--short"]);
+  if (dirtyEntries.length > 0) {
+    throw new Error(
+      `Root checkout mode requires a clean repository at ${repoPath}; found uncommitted changes: ${dirtyEntries.join(" | ")}`,
+    );
+  }
+
+  const currentBranch = await readGitBranch(repoPath);
+  if (!currentBranch) {
+    throw new Error(`Root checkout mode requires a named branch in ${repoPath}; detached HEAD is not supported.`);
+  }
+
+  if (await localBranchExists(repoPath, spec.branchInstructions.createBranch)) {
+    await checkoutGitRef(repoPath, spec.branchInstructions.createBranch);
+  } else {
+    await checkoutGitRef(repoPath, spec.branchInstructions.sourceBranch);
+    await execFileAsync("git", [
+      "-C",
+      repoPath,
+      "checkout",
+      "--ignore-other-worktrees",
+      "-b",
+      spec.branchInstructions.createBranch,
+    ]);
+  }
+
+  await installCheckoutCodexSupport(paths, repoPath, true);
+  return repoPath;
 }
 
 export function createRunId(): string {
@@ -981,10 +1041,14 @@ export async function ensureCodexHome(paths: RuntimePaths): Promise<string> {
   return codexHome;
 }
 
-export async function worktreeAdditionalDirectories(worktreePath: string): Promise<string[]> {
-  const gitDir = path.resolve(worktreePath, await readGitStdout(worktreePath, ["rev-parse", "--git-dir"]));
-  const commonDir = path.resolve(worktreePath, await readGitStdout(worktreePath, ["rev-parse", "--git-common-dir"]));
+export async function checkoutAdditionalDirectories(checkoutPath: string): Promise<string[]> {
+  const gitDir = path.resolve(checkoutPath, await readGitStdout(checkoutPath, ["rev-parse", "--git-dir"]));
+  const commonDir = path.resolve(checkoutPath, await readGitStdout(checkoutPath, ["rev-parse", "--git-common-dir"]));
   return [...new Set([gitDir, commonDir])];
+}
+
+export async function worktreeAdditionalDirectories(worktreePath: string): Promise<string[]> {
+  return checkoutAdditionalDirectories(worktreePath);
 }
 
 export async function validateImplementationCandidate(
@@ -1030,7 +1094,7 @@ export async function validateImplementationCandidate(
     category: "correctness",
     title: "Reported candidate commit does not match repository state",
     detail: problems.join(" "),
-    action: "Create and check out a real commit for the implemented changes, leave the worktree clean, and then report that exact commit hash.",
+    action: "Create and check out a real commit for the implemented changes, leave the checkout clean, and then report that exact commit hash.",
   };
 }
 
@@ -1077,6 +1141,7 @@ export function initialRunState(spec: SpecDocument, legacyDoneDetected: boolean)
     status: legacyDoneDetected ? "done" : "queued",
     currentIteration: 0,
     runId: undefined,
+    checkoutMode: "worktree",
     worktreePath: undefined,
     lastCommit: undefined,
     lastError: undefined,

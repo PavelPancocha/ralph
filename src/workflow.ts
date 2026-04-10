@@ -5,6 +5,7 @@ import { Codex } from "@openai/codex-sdk";
 
 import type {
   AgentRunArtifact,
+  CheckoutMode,
   CodexThreadConfig,
   ImplementationReport,
   PlanningLens,
@@ -37,6 +38,7 @@ import {
 } from "./prompts.js";
 import {
   appendRunEvent,
+  checkoutAdditionalDirectories,
   createRunId,
   ensureCodexHome,
   ensureSpecWorktree,
@@ -53,8 +55,8 @@ import {
   saveRunState,
   runVerificationCommands,
   publishApprovedSpec,
+  prepareRootCheckout,
   validateImplementationCandidate,
-  worktreeAdditionalDirectories,
 } from "./runtime.js";
 import { discoverSpecPaths, parseSpecFile } from "./specs.js";
 
@@ -78,6 +80,7 @@ const understandingPacketSchema = z.object({
   summary: z.string(),
   repoPath: z.string(),
   worktreePath: z.string(),
+  checkoutMode: z.enum(["worktree", "root"]).default("worktree"),
   featureBranch: z.string(),
   targetFiles: z.array(z.string()),
   contextFiles: z.array(z.string()),
@@ -136,7 +139,6 @@ const defaultReviewerRoles: ReviewerReport["reviewer"][] = ["correctness", "test
 const planningHelperRoles = ["planning_spec", "planning_repo", "planning_risks"] as const;
 const defaultPrimaryModel = "gpt-5.4";
 const defaultHelperModel = "gpt-5.4-mini";
-
 interface StructuredOutputSchema<T> {
   zod: z.ZodTypeAny;
   json: Record<string, unknown>;
@@ -201,6 +203,7 @@ const understandingPacketOutputSchema: StructuredOutputSchema<UnderstandingPacke
       summary: { type: "string" },
       repoPath: { type: "string" },
       worktreePath: { type: "string" },
+      checkoutMode: { type: "string", enum: ["worktree", "root"] },
       featureBranch: { type: "string" },
       targetFiles: { type: "array", items: { type: "string" } },
       contextFiles: { type: "array", items: { type: "string" } },
@@ -213,13 +216,14 @@ const understandingPacketOutputSchema: StructuredOutputSchema<UnderstandingPacke
       "summary",
       "repoPath",
       "worktreePath",
-      "featureBranch",
+      "checkoutMode",
       "targetFiles",
       "contextFiles",
       "executionPlan",
       "verificationCommands",
       "assumptions",
       "riskFlags",
+      "featureBranch",
     ],
     additionalProperties: false,
   },
@@ -328,6 +332,14 @@ function resolveModel(modelOverride: string | undefined, fallback: string): stri
   return modelOverride ?? fallback;
 }
 
+function resolveCheckoutMode(checkoutMode: CheckoutMode | undefined): CheckoutMode {
+  return checkoutMode ?? "worktree";
+}
+
+function specNeedsDockerSocket(spec: SpecDocument): boolean {
+  return spec.verificationCommands.some((command) => /\bdocker(?:\s+compose)?\b/i.test(command));
+}
+
 function planningHelperLens(role: typeof planningHelperRoles[number]): PlanningLens {
   switch (role) {
     case "planning_spec":
@@ -345,12 +357,14 @@ function planningHelperOptions(
   worktreePath: string,
   additionalDirectories: string[],
   escalated: boolean,
+  checkoutMode: CheckoutMode,
 ): RoleExecutionOptions {
   return {
     role,
     model: resolveModel(modelOverride, escalated ? defaultPrimaryModel : defaultHelperModel),
     workingDirectory: worktreePath,
     additionalDirectories,
+    checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
     reasoningEffort: escalated ? "xhigh" : role === "planning_risks" ? "high" : "medium",
@@ -361,12 +375,14 @@ function supervisorOptions(
   modelOverride: string | undefined,
   worktreePath: string,
   additionalDirectories: string[],
+  checkoutMode: CheckoutMode,
 ): RoleExecutionOptions {
   return {
     role: "supervisor",
     model: resolveModel(modelOverride, defaultPrimaryModel),
     workingDirectory: worktreePath,
     additionalDirectories,
+    checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
     reasoningEffort: "xhigh",
@@ -377,12 +393,14 @@ function understanderOptions(
   modelOverride: string | undefined,
   worktreePath: string,
   additionalDirectories: string[],
+  checkoutMode: CheckoutMode,
 ): RoleExecutionOptions {
   return {
     role: "understander",
     model: resolveModel(modelOverride, defaultPrimaryModel),
     workingDirectory: worktreePath,
     additionalDirectories,
+    checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
     reasoningEffort: "xhigh",
@@ -394,12 +412,14 @@ function implementerOptions(
   worktreePath: string,
   additionalDirectories: string[],
   escalated: boolean,
+  checkoutMode: CheckoutMode,
 ): RoleExecutionOptions {
   return {
     role: "implementer",
     model: resolveModel(modelOverride, escalated ? defaultPrimaryModel : defaultHelperModel),
     workingDirectory: worktreePath,
     additionalDirectories,
+    checkoutMode,
     forceFreshThread: escalated,
     sandboxMode: "workspace-write",
     approvalPolicy: "never",
@@ -412,6 +432,7 @@ function reviewerRoleOptions(
   modelOverride: string | undefined,
   role: ReviewerReport["reviewer"],
   additionalDirectories: string[],
+  checkoutMode: CheckoutMode,
   escalated = false,
 ): RoleExecutionOptions {
   const roleMap: Record<ReviewerReport["reviewer"], RoleExecutionOptions["role"]> = {
@@ -425,6 +446,7 @@ function reviewerRoleOptions(
     model: resolveModel(modelOverride, escalated ? defaultPrimaryModel : defaultHelperModel),
     workingDirectory: worktreePath,
     additionalDirectories,
+    checkoutMode,
     forceFreshThread: escalated,
     sandboxMode: "read-only",
     approvalPolicy: "never",
@@ -436,12 +458,14 @@ function reviewLeadOptions(
   modelOverride: string | undefined,
   worktreePath: string,
   additionalDirectories: string[],
+  checkoutMode: CheckoutMode,
 ): RoleExecutionOptions {
   return {
     role: "review_lead",
     model: resolveModel(modelOverride, defaultPrimaryModel),
     workingDirectory: worktreePath,
     additionalDirectories,
+    checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
     reasoningEffort: "xhigh",
@@ -452,12 +476,14 @@ function recheckOptions(
   modelOverride: string | undefined,
   worktreePath: string,
   additionalDirectories: string[],
+  checkoutMode: CheckoutMode,
 ): RoleExecutionOptions {
   return {
     role: "recheck",
     model: resolveModel(modelOverride, defaultPrimaryModel),
     workingDirectory: worktreePath,
     additionalDirectories,
+    checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
     reasoningEffort: "xhigh",
@@ -566,6 +592,7 @@ function rolePolicyFingerprint(options: RoleExecutionOptions): string {
   return JSON.stringify({
     role: options.role,
     model: options.model,
+    checkoutMode: resolveCheckoutMode(options.checkoutMode),
     workingDirectory: path.resolve(options.workingDirectory),
     additionalDirectories: [...(options.additionalDirectories ?? [])].map((dir) => path.resolve(dir)).sort(),
     sandboxMode: options.sandboxMode,
@@ -974,6 +1001,7 @@ export async function executeSpec(
   const legacyDone = await legacyDoneExists(paths.specRoot, spec);
   let state = ((options.dryRun ? await peekRunState(paths, spec.specId) : await loadRunState(paths, spec.specId)))
     ?? initialRunState(spec, legacyDone);
+  const checkoutMode = resolveCheckoutMode(options.checkoutMode);
   if (state.status === "done") {
     return {
       status: "done",
@@ -1002,16 +1030,17 @@ export async function executeSpec(
       }, false);
       return dryRunSourceOutcome.outcome;
     }
-    const plannedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+    const plannedCheckoutPath = checkoutMode === "root" ? repoPath : path.join(paths.worktreesRoot, spec.specId);
+    const plannedCheckoutLabel = checkoutMode === "root" ? "root checkout" : "worktree";
     const dryOutcome: SupervisorOutcome = {
       status: "needs_more_work",
-      summary: `Dry run would use worktree at ${plannedWorktreePath} for branch ${spec.branchInstructions.createBranch}.`,
+      summary: `Dry run would use ${plannedCheckoutLabel} at ${plannedCheckoutPath} for branch ${spec.branchInstructions.createBranch}.`,
       candidateCommit: undefined,
       nextAction: "Run without --dry-run to execute the workflow.",
     };
     await emitProgress(paths, spec, runId, deps, {
       phase: "dry-run",
-      summary: `would use worktree at ${plannedWorktreePath}`,
+      summary: `would use ${plannedCheckoutLabel} at ${plannedCheckoutPath}`,
     }, false);
     return dryOutcome;
   }
@@ -1027,13 +1056,19 @@ export async function executeSpec(
   await ensureCodexHome(paths);
   await saveRunState(paths, state);
 
-  const worktreePath = await ensureSpecWorktree(paths, spec, repoPath);
-  const additionalDirectories = await worktreeAdditionalDirectories(worktreePath);
+  const worktreePath = checkoutMode === "root"
+    ? await prepareRootCheckout(paths, spec, repoPath)
+    : await ensureSpecWorktree(paths, spec, repoPath);
+  const additionalDirectories = await checkoutAdditionalDirectories(worktreePath);
+  const dockerAdditionalDirectories = checkoutMode === "root" && specNeedsDockerSocket(spec)
+    ? [...new Set([...additionalDirectories, "/var/run"])]
+    : additionalDirectories;
+  state.checkoutMode = checkoutMode;
   state.worktreePath = worktreePath;
   await saveRunState(paths, state);
   await emitProgress(paths, spec, runId, deps, {
     phase: "setup",
-    summary: `worktree ready at ${worktreePath}`,
+    summary: `${checkoutMode === "root" ? "checkout" : "worktree"} ready at ${worktreePath}`,
   });
 
   const codexFactory = deps.createCodex ?? createCodex;
@@ -1148,7 +1183,7 @@ export async function executeSpec(
       spec,
       state,
       runId,
-      supervisorOptions(options.model, worktreePath, additionalDirectories),
+      supervisorOptions(options.model, worktreePath, additionalDirectories, checkoutMode),
       supervisorOutcomeOutputSchema,
       buildSupervisorFinalPrompt(spec, currentUnderstanding, currentImplementation, currentRecheckVerdict),
     );
@@ -1210,7 +1245,7 @@ export async function executeSpec(
       spec,
       state,
       runId,
-      implementerOptions(options.model, worktreePath, additionalDirectories, escalated),
+      implementerOptions(options.model, worktreePath, dockerAdditionalDirectories, escalated, checkoutMode),
       implementationReportOutputSchema,
       buildImplementerPrompt(
         spec,
@@ -1284,7 +1319,7 @@ export async function executeSpec(
         spec,
         state,
         runId,
-        planningHelperOptions(helperRole, options.model, worktreePath, additionalDirectories, escalated),
+        planningHelperOptions(helperRole, options.model, worktreePath, additionalDirectories, escalated, checkoutMode),
         planningViewOutputSchema,
         buildPlanningHelperPrompt(spec, worktreePath, planningHelperLens(helperRole), invalidationReason),
       );
@@ -1307,7 +1342,7 @@ export async function executeSpec(
       spec,
       state,
       runId,
-      supervisorOptions(options.model, worktreePath, additionalDirectories),
+      supervisorOptions(options.model, worktreePath, additionalDirectories, checkoutMode),
       supervisorStrategyOutputSchema,
       buildSupervisorPrompt(spec, worktreePath, planningViews, invalidationReason),
     );
@@ -1345,7 +1380,14 @@ export async function executeSpec(
         spec,
         state,
         runId,
-        reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories, retryingFromFailure),
+        reviewerRoleOptions(
+          worktreePath,
+          options.model,
+          reviewer,
+          dockerAdditionalDirectories,
+          checkoutMode,
+          retryingFromFailure,
+        ),
         reviewerReportOutputSchema,
         buildReviewerPrompt(reviewer, spec, currentUnderstanding, currentImplementation, worktreePath, retryingFromFailure),
       );
@@ -1373,7 +1415,7 @@ export async function executeSpec(
         spec,
         state,
         runId,
-        reviewLeadOptions(options.model, worktreePath, additionalDirectories),
+        reviewLeadOptions(options.model, worktreePath, additionalDirectories, checkoutMode),
         reviewLeadReportOutputSchema,
         buildReviewLeadPrompt(spec, currentUnderstanding, currentImplementation, reviewerOutputs, worktreePath, true),
       );
@@ -1400,7 +1442,7 @@ export async function executeSpec(
             spec,
             state,
             runId,
-            reviewerRoleOptions(worktreePath, options.model, reviewer, additionalDirectories, true),
+            reviewerRoleOptions(worktreePath, options.model, reviewer, dockerAdditionalDirectories, checkoutMode, true),
             reviewerReportOutputSchema,
             buildReviewerPrompt(reviewer, spec, currentUnderstanding, currentImplementation, worktreePath, true),
           );
@@ -1424,7 +1466,7 @@ export async function executeSpec(
           spec,
           state,
           runId,
-          reviewLeadOptions(options.model, worktreePath, additionalDirectories),
+          reviewLeadOptions(options.model, worktreePath, additionalDirectories, checkoutMode),
           reviewLeadReportOutputSchema,
           buildReviewLeadPrompt(
             spec,
@@ -1486,7 +1528,7 @@ export async function executeSpec(
       spec,
       state,
       runId,
-      recheckOptions(options.model, worktreePath, additionalDirectories),
+      recheckOptions(options.model, worktreePath, additionalDirectories, checkoutMode),
       recheckVerdictOutputSchema,
       buildRecheckPrompt(
         spec,
@@ -1617,7 +1659,7 @@ export async function executeSpec(
       spec,
       state,
       runId,
-      understanderOptions(options.model, worktreePath, additionalDirectories),
+      understanderOptions(options.model, worktreePath, additionalDirectories, checkoutMode),
       understandingPacketOutputSchema,
       buildUnderstanderPrompt(spec, worktreePath, supervisorStrategy.output, planningViews, currentInvalidationReason),
     );
@@ -1719,7 +1761,7 @@ export async function executeSpec(
     spec,
     state,
     runId,
-    supervisorOptions(options.model, worktreePath, additionalDirectories),
+    supervisorOptions(options.model, worktreePath, additionalDirectories, checkoutMode),
     supervisorOutcomeOutputSchema,
     buildSupervisorFinalPrompt(spec, understandingPacket, implementationReport, recheckVerdict),
   );
