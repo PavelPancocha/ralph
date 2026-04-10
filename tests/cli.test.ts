@@ -56,6 +56,12 @@ async function writeDoneState(paths: ReturnType<typeof buildRuntimePaths>, specI
   );
 }
 
+async function scaffoldProjectRoot(projectRoot: string): Promise<void> {
+  await fs.mkdir(path.join(projectRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, "package.json"), "{\"name\":\"ralph\",\"type\":\"module\"}\n", "utf8");
+  await fs.writeFile(path.join(projectRoot, "src", "cli.ts"), "export {};\n", "utf8");
+}
+
 test("parseArgs keeps the first positional token as a run filter when the subcommand is omitted", () => {
   const parsed = parseArgs(["1001-demo", "--dry-run", "--max-iterations", "5"]);
 
@@ -137,6 +143,12 @@ test("parseArgs accepts --resume for checkpointed reruns", () => {
   assert.equal(parsed.resume, true);
 });
 
+test("parseArgs accepts --spec-root for custom spec directories", () => {
+  const parsed = parseArgs(["run", "--spec-root", "../zemtu/docs/plans/payment-toolbox/specs"]);
+  assert.equal(parsed.parseError, undefined);
+  assert.equal(parsed.specRoot, "../zemtu/docs/plans/payment-toolbox/specs");
+});
+
 test("parseArgs accepts mark-done with an explicit target", () => {
   const parsed = parseArgs(["mark-done", "1001-demo"]);
   assert.equal(parsed.parseError, undefined);
@@ -158,6 +170,11 @@ test("parseArgs rejects --model when the explicit value is missing", () => {
 test("parseArgs rejects --to when the explicit value is missing", () => {
   assert.equal(parseArgs(["run", "--to"]).parseError, "Missing --to value");
   assert.equal(parseArgs(["run", "--to", "--dry-run"]).parseError, "Missing --to value");
+});
+
+test("parseArgs rejects --spec-root when the explicit value is missing", () => {
+  assert.equal(parseArgs(["run", "--spec-root"]).parseError, "Missing --spec-root value");
+  assert.equal(parseArgs(["run", "--spec-root", "--dry-run"]).parseError, "Missing --spec-root value");
 });
 
 test("parseArgs rejects unknown long options instead of treating them as spec filters", () => {
@@ -225,6 +242,99 @@ test("create-spec scaffolds a spec with required and recommended sections", asyn
   assert.match(created, /^## Commit Requirements$/m);
 });
 
+test("create-spec respects a custom spec root resolved from the Ralph project root", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-custom-spec-root-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const customSpecsRoot = path.join(workspaceRoot, "zemtu", "docs", "plans", "payment-toolbox", "specs");
+  const specTarget = "1001-payment-toolbox.md";
+  const previousCwd = process.cwd();
+
+  await scaffoldProjectRoot(projectRoot);
+
+  process.chdir(workspaceRoot);
+  try {
+    const exitCode = await runCommand({
+      command: "create-spec",
+      specFilters: [],
+      workspaceRoot: undefined,
+      specRoot: "../zemtu/docs/plans/payment-toolbox/specs",
+      model: undefined,
+      maxIterations: 3,
+      dryRun: false,
+      toSpec: undefined,
+      inspectTarget: undefined,
+      createSpecTarget: specTarget,
+    });
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+  }
+
+  const created = await fs.readFile(path.join(customSpecsRoot, specTarget), "utf8");
+  assert.match(created, /^# 1001 - Payment Toolbox$/m);
+});
+
+test("inspect reads specs from a custom spec root", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-custom-inspect-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const customSpecsRoot = path.join(workspaceRoot, "zemtu", "docs", "plans", "payment-toolbox", "specs");
+  const previousCwd = process.cwd();
+  let logOutput = "";
+  const originalLog = console.log;
+
+  await scaffoldProjectRoot(projectRoot);
+  await fs.mkdir(customSpecsRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(customSpecsRoot, "1001-payment-toolbox.md"),
+    `# 1001 - Payment Toolbox
+
+Repo: demo-repo
+Workdir: demo-repo
+
+## Branch Instructions
+- Source branch: \`dev\`
+- Create branch: \`feature/payment-toolbox\`
+
+## Goal
+Inspect the custom spec root.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  process.chdir(workspaceRoot);
+  try {
+    const exitCode = await runCommand({
+      command: "inspect",
+      specFilters: [],
+      workspaceRoot: undefined,
+      specRoot: "../zemtu/docs/plans/payment-toolbox/specs",
+      model: undefined,
+      maxIterations: 3,
+      dryRun: false,
+      toSpec: undefined,
+      inspectTarget: "1001-payment-toolbox.md",
+      createSpecTarget: undefined,
+    });
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+    console.log = originalLog;
+  }
+
+  const parsed = JSON.parse(logOutput) as { specId: string; specPath: string; relFromSpecs: string };
+  assert.equal(parsed.specId, "1001-payment-toolbox");
+  assert.equal(parsed.relFromSpecs, "1001-payment-toolbox.md");
+  assert.equal(parsed.specPath, path.join(customSpecsRoot, "1001-payment-toolbox.md"));
+});
+
 test("runCommand mark-done updates state and writes a done report for the selected spec", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-mark-done-"));
   await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
@@ -257,6 +367,59 @@ test("runCommand mark-done updates state and writes a done report for the select
   assert.match(report, /Commit: manual/);
   assert.match(report, /Manually marked done outside Ralph\./);
   assert.match(logOutput, /Marked 1001-one as done\./);
+});
+
+test("runCommand mark-done writes state into the custom spec-root namespace", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-custom-mark-done-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const customSpecsRoot = path.join(workspaceRoot, "zemtu", "docs", "plans", "payment-toolbox", "specs");
+  const previousCwd = process.cwd();
+  let logOutput = "";
+  const originalLog = console.log;
+
+  await scaffoldProjectRoot(projectRoot);
+  await fs.mkdir(customSpecsRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(customSpecsRoot, "1001-payment-toolbox.md"),
+    `# 1001 - Payment Toolbox
+
+Repo: demo-repo
+Workdir: demo-repo
+
+## Branch Instructions
+- Source branch: \`dev\`
+- Create branch: \`feature/payment-toolbox\`
+
+## Goal
+Mark the custom spec done.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  process.chdir(workspaceRoot);
+  try {
+    const exitCode = await runCommand(parseArgs(["mark-done", "--spec-root", "../zemtu/docs/plans/payment-toolbox/specs", "1001-payment-toolbox"]));
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+    console.log = originalLog;
+  }
+
+  const paths = buildRuntimePaths(projectRoot, workspaceRoot, customSpecsRoot);
+  const state = JSON.parse(await fs.readFile(path.join(paths.stateRoot, "1001-payment-toolbox.json"), "utf8")) as { status: string };
+  const report = await fs.readFile(path.join(paths.reportsRoot, "done", "1001-payment-toolbox.md"), "utf8");
+
+  assert.equal(state.status, "done");
+  assert.match(report, /# Done: 1001-payment-toolbox/);
+  assert.match(logOutput, /Marked 1001-payment-toolbox as done\./);
 });
 
 test("runCommand streams spec-indexed progress lines and log paths during run", async () => {
@@ -416,6 +579,104 @@ test("runCommand auto-detects a nested ralph project root when invoked from the 
   }
 
   assert.equal(executedSpecId, "1001-one");
+});
+
+test("runCommand discovers specs from a custom spec root", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-custom-discovery-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const repoRoot = path.join(workspaceRoot, "demo-repo");
+  const customSpecsRoot = path.join(workspaceRoot, "zemtu", "docs", "plans", "payment-toolbox", "specs");
+  const previousCwd = process.cwd();
+  let executedSpecId: string | undefined;
+
+  await scaffoldProjectRoot(projectRoot);
+  await fs.mkdir(repoRoot, { recursive: true });
+  await fs.mkdir(customSpecsRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(customSpecsRoot, "1001-payment-toolbox.md"),
+    `# 1001 - Payment Toolbox
+
+Repo: demo-repo
+Workdir: demo-repo
+
+## Branch Instructions
+- Source branch: \`dev\`
+- Create branch: \`feature/payment-toolbox\`
+
+## Goal
+Exercise custom spec discovery.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+
+  process.chdir(workspaceRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: [],
+        workspaceRoot,
+        specRoot: "../zemtu/docs/plans/payment-toolbox/specs",
+        model: undefined,
+        maxIterations: 3,
+        dryRun: true,
+        toSpec: undefined,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+      },
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          executedSpecId = spec.specId;
+          return {
+            status: "needs_more_work",
+            summary: "Dry run prepared worktree.",
+            candidateCommit: undefined,
+            nextAction: "re-run",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+  }
+
+  assert.equal(executedSpecId, "1001-payment-toolbox");
+});
+
+test("status reads only the selected custom spec-root namespace", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-custom-status-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const customSpecsRoot = path.join(workspaceRoot, "zemtu", "docs", "plans", "payment-toolbox", "specs");
+  const previousCwd = process.cwd();
+  let logOutput = "";
+  const originalLog = console.log;
+
+  await scaffoldProjectRoot(projectRoot);
+  const customPaths = buildRuntimePaths(projectRoot, workspaceRoot, customSpecsRoot);
+  await ensureRuntimePaths(customPaths);
+  await writeDoneState(customPaths, "1001-payment-toolbox");
+
+  console.log = (message?: unknown) => {
+    logOutput += `${String(message)}\n`;
+  };
+  process.chdir(workspaceRoot);
+  try {
+    const exitCode = await runCommand(parseArgs(["status", "--spec-root", "../zemtu/docs/plans/payment-toolbox/specs"]));
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+    console.log = originalLog;
+  }
+
+  assert.match(logOutput, new RegExp(`specRoot=${customSpecsRoot.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}`));
+  assert.match(logOutput, /1001-payment-toolbox\tdone\titeration=1\tcommit=-/);
+  assert.doesNotMatch(logOutput, /No run state found\./);
 });
 
 test("runCommand does not create runtime directories for dry-run", async () => {

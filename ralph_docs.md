@@ -8,7 +8,7 @@ This document describes the current Ralph implementation in this repository: the
 
 Ralph is a local spec runner that:
 
-- reads markdown specs from `specs/`
+- reads markdown specs from `specs/` by default, or from a custom `--spec-root`
 - resolves the target repository from `Repo:` and `Workdir:`
 - creates one isolated git worktree per spec
 - runs a supervised multi-agent Codex workflow
@@ -110,7 +110,7 @@ It parses command-line flags, loads specs, resolves `--to` bounded runs, creates
 
 Responsible for:
 
-- discovering runnable specs under `specs/`
+- discovering runnable specs under the selected spec root
 - ignoring legacy state directories such as `done`, `plans`, `sessions`, and `candidates`
 - parsing markdown sections into a normalized `SpecDocument`
 
@@ -120,7 +120,7 @@ The parser keeps compatibility with the existing spec backlog format.
 
 Responsible for:
 
-- building `.ralph/` paths
+- building `.ralph/` paths and spec-root namespaces
 - loading and saving run state
 - writing artifacts and done reports
 - writing per-run progress logs under `.ralph/runs/`
@@ -168,7 +168,7 @@ Dry-run special case:
 
 ## Runtime Layout
 
-The active runtime root is `.ralph/`.
+The active runtime root is `.ralph/` for the default local `specs/` backlog.
 
 ```text
 .ralph/
@@ -182,6 +182,18 @@ The active runtime root is `.ralph/`.
 │   └── <spec-id>.json
 └── worktrees/
     └── <spec-id>/
+```
+
+When `--spec-root` points anywhere other than the default local `specs/` directory, Ralph writes to a namespaced runtime root:
+
+```text
+.ralph/spec-roots/<derived-id>/
+├── artifacts/
+├── reports/
+├── runs/
+├── sessions/
+├── state/
+└── worktrees/
 ```
 
 ### What each area means
@@ -325,7 +337,7 @@ What remains compatible:
 
 - existing markdown specs
 - existing spec directory layout under `specs/`
-- legacy `specs/done/...` markers as a signal to skip already-completed specs
+- legacy `done/...` markers inside the selected spec root as a signal to skip already-completed specs
 
 What is no longer the active runtime contract:
 
@@ -400,6 +412,7 @@ npm run dev -- 1001-demo
 ```bash
 npm run dev -- --dry-run
 npm run dev -- --dryrun
+npm run dev -- --spec-root ../zemtu/docs/plans/payment-toolbox/specs --dry-run
 ```
 
 Dry-run is read-only. It prints spec-indexed progress lines, but it does not create worktrees, state files, artifacts, or event logs.
@@ -433,6 +446,7 @@ npm run dev -- --help
 
 ```bash
 npm run dev -- inspect 1001-demo.md
+npm run dev -- inspect --spec-root ../zemtu/docs/plans/payment-toolbox/specs 1001-payment-toolbox.md
 ```
 
 ### Create a sample spec
@@ -440,9 +454,10 @@ npm run dev -- inspect 1001-demo.md
 ```bash
 npm run dev -- create-spec 1234-my-new-spec.md
 npm run dev -- create-spec area/1235-follow-up-spec.md
+npm run dev -- create-spec --spec-root ../zemtu/docs/plans/payment-toolbox/specs 1001-payment-toolbox.md
 ```
 
-This command creates a new markdown file under `specs/` and prepopulates it with:
+This command creates a new markdown file under the selected spec root and prepopulates it with:
 
 - required sections the parser/runtime currently depend on
 - recommended sections that help produce better execution packets and reviews
@@ -467,6 +482,7 @@ npm link
 ralph --dry-run
 ralph --dryrun
 ralph --to 1003
+ralph --spec-root ../zemtu/docs/plans/payment-toolbox/specs
 ralph 1001-demo
 ralph mark-done 1001-demo
 ralph status
@@ -509,6 +525,7 @@ The workflow file is:
 - Ralph is local-first. It expects to operate on repositories already present in the workspace.
 - The CLI exposes `run`, `status`, `inspect`, and `create-spec`. There is no dedicated `resume` command yet because persistent state plus stable worktree paths already provide the base for restart-safe execution.
 - `--to <spec>` is the built-in bounded batch operator flow for sequential backlog execution.
+- `--spec-root <path>` accepts either an absolute path or a path relative to the Ralph project root. Positional spec paths remain relative to that selected spec root.
 - `--dry-run` is intentionally non-persistent: no `.ralph/` writes happen during dry-run.
 - The current review loop is capped by `--max-iterations` (default: `5`).
 - Success is determined by structured agent outputs and the recheck verdict, not by heuristics on plain terminal output.

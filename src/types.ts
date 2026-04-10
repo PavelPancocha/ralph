@@ -56,6 +56,9 @@ export interface SpecDocument {
 export interface RuntimePaths {
   projectRoot: string;
   workspaceRoot: string;
+  specRoot: string;
+  specRootRuntimeId: string;
+  isDefaultSpecRoot: boolean;
   ralphRoot: string;
   runsRoot: string;
   sessionsRoot: string;

@@ -1,6 +1,6 @@
 # Ralph
 
-Ralph is a spec-driven development runner built around the official Codex SDK. It reads markdown specs from `specs/`, creates an isolated git worktree per spec, and executes a supervised multi-agent loop until the spec is either completed or fails review.
+Ralph is a spec-driven development runner built around the official Codex SDK. It reads markdown specs from `specs/` by default, or from a custom `--spec-root`, creates an isolated git worktree per spec, and executes a supervised multi-agent loop until the spec is either completed or fails review.
 
 This repository is the v2 rewrite. The old Python runner still exists in the tree, but the active implementation documented here is the Node/TypeScript CLI under [`src/`](./src).
 
@@ -25,7 +25,7 @@ For each spec, Ralph runs a fixed role pipeline:
 
 The runner is file-first and local-first:
 
-- Specs stay in `specs/`
+- Specs stay in `specs/` by default, or in a custom `--spec-root`
 - Runtime state stays in `.ralph/`
 - Each spec gets a dedicated worktree under `.ralph/worktrees/`
 - Human-readable and machine-readable artifacts are written to disk
@@ -111,6 +111,9 @@ npm run dev -- --to 1003
 # Override workspace root
 npm run dev -- --workspace-root /path/to/workspace
 
+# Override spec root
+npm run dev -- --spec-root ../zemtu/docs/plans/payment-toolbox/specs
+
 # Override all Ralph-managed roles to one model
 npm run dev -- --model gpt-5.4
 
@@ -121,11 +124,17 @@ npm run dev -- --max-iterations 3
 # Inspect parsed spec JSON
 npm run dev -- inspect 1001-demo.md
 
-# Inspect a nested spec (path is relative to specs/)
+# Inspect a nested spec (path is relative to the selected spec root)
 npm run dev -- inspect area/1235-follow-up-spec.md
+
+# Inspect a spec from a custom spec root
+npm run dev -- inspect --spec-root ../zemtu/docs/plans/payment-toolbox/specs 1001-payment-toolbox.md
 
 # Create a new sample spec
 npm run dev -- create-spec area/1234-sample-feature.md
+
+# Create a new sample spec in a custom spec root
+npm run dev -- create-spec --spec-root ../zemtu/docs/plans/payment-toolbox/specs 1001-payment-toolbox.md
 
 # Mark a spec done manually
 npm run dev -- mark-done 1001-demo
@@ -153,6 +162,7 @@ ralph --dry-run
 ralph --dryrun
 ralph --to 1003
 ralph --resume
+ralph --spec-root ../zemtu/docs/plans/payment-toolbox/specs
 ralph 1001-demo
 ralph mark-done 1001-demo
 ralph status
@@ -236,7 +246,7 @@ ralph/
 ├── src/                     # TypeScript CLI and orchestration
 ├── tests/                   # Automated tests
 ├── codex-support/           # Hook/config bundle copied into worktrees
-├── specs/                   # Spec backlog
+├── specs/                   # Default local spec backlog
 ├── .ralph/
 │   ├── artifacts/           # Per-run structured and human-readable artifacts
 │   ├── reports/
@@ -258,14 +268,17 @@ Dry-run exception:
 
 ## Spec Compatibility
 
-Ralph v2 is designed to keep using the existing spec backlog format. Specs still live under `specs/` and still use the same `0001-...md` naming style.
+Ralph v2 is designed to keep using the existing spec backlog format. Specs still use the same `0001-...md` naming style, with `specs/` as the default root and `--spec-root` available when you want Ralph to read and scaffold specs somewhere else.
 
 To scaffold a new spec file with the required and recommended sections already in place:
 
 ```bash
 npm run dev -- create-spec 1234-my-new-spec.md
 npm run dev -- create-spec area/1235-follow-up-spec.md
+npm run dev -- create-spec --spec-root ../zemtu/docs/plans/payment-toolbox/specs 1001-payment-toolbox.md
 ```
+
+`--spec-root` accepts either an absolute path or a path relative to the Ralph project root. The positional spec path remains relative to the selected spec root.
 
 For a runnable spec, the parser currently requires:
 
@@ -350,9 +363,11 @@ Important outputs:
 - `.ralph/worktrees/<spec-id>/`
   Git worktree used for the spec run.
 
+When you use a non-default `--spec-root`, Ralph namespaces runtime state, artifacts, reports, and worktrees under `.ralph/spec-roots/<derived-id>/...` so different spec backlogs with the same `1001-...` ids do not collide.
+
 Before creating or reusing a real worktree, Ralph prunes stale git worktree registrations so missing-but-registered paths do not block the run.
 
-Legacy `specs/done/...` markers are still recognized as a skip signal when present, but new successful runs write done reports under `.ralph/reports/done/`.
+Legacy `done/...` markers inside the selected spec root are still recognized as a skip signal when present, but new successful runs write done reports under the matching `.ralph/.../reports/done/` namespace.
 
 ## Codex Hooks
 

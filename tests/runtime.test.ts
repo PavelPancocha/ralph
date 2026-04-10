@@ -13,6 +13,7 @@ import {
   ensureRuntimePaths,
   ensureSpecWorktree,
   initialRunState,
+  legacyDoneExists,
   listRunStates,
   markSpecDone,
   publishApprovedSpec,
@@ -99,6 +100,16 @@ test("buildRuntimePaths places state under .ralph", () => {
   assert.equal(paths.worktreesRoot, "/tmp/ralph/.ralph/worktrees");
 });
 
+test("buildRuntimePaths namespaces runtime state for custom spec roots", () => {
+  const first = buildRuntimePaths("/tmp/ralph", "/tmp", "/tmp/zemtu/docs/plans/payment-toolbox/specs");
+  const second = buildRuntimePaths("/tmp/ralph", "/tmp", "/tmp/zemtu/docs/plans/another/specs");
+
+  assert.equal(first.specRoot, "/tmp/zemtu/docs/plans/payment-toolbox/specs");
+  assert.match(first.ralphRoot, /\/tmp\/ralph\/\.ralph\/spec-roots\/.+/);
+  assert.notEqual(first.ralphRoot, second.ralphRoot);
+  assert.notEqual(first.stateRoot, second.stateRoot);
+});
+
 test("initialRunState starts queued when no legacy done marker exists", () => {
   const state = initialRunState(
     {
@@ -159,6 +170,41 @@ test("initialRunState starts done when a legacy done marker exists", () => {
   );
   assert.equal(state.status, "done");
   assert.equal(state.legacyDoneDetected, true);
+});
+
+test("legacyDoneExists checks the selected spec root", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-runtime-legacy-done-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const customSpecsRoot = path.join(workspaceRoot, "zemtu", "docs", "plans", "payment-toolbox", "specs");
+  const spec: SpecDocument = {
+    specPath: path.join(customSpecsRoot, "1001-example.md"),
+    relFromSpecs: "1001-example.md",
+    relFromWorkspace: "zemtu/docs/plans/payment-toolbox/specs/1001-example.md",
+    specId: "1001-example",
+    title: "1001 - Example",
+    repo: "repo",
+    workdir: "repo",
+    branchInstructions: {
+      sourceBranch: "dev",
+      createBranch: "feature/example",
+    },
+    goal: "Goal",
+    scopeIn: [],
+    boundariesOut: [],
+    constraints: [],
+    dependencies: [],
+    requiredReading: [],
+    acceptanceCriteria: [],
+    commitRequirements: [],
+    verificationCommands: [],
+    rawSections: {},
+  };
+
+  await fs.mkdir(path.join(customSpecsRoot, "done"), { recursive: true });
+  await fs.writeFile(path.join(customSpecsRoot, "done", "1001-example.md"), "# done\n", "utf8");
+
+  assert.equal(await legacyDoneExists(customSpecsRoot, spec), true);
+  assert.equal(await legacyDoneExists(path.join(projectRoot, "specs"), spec), false);
 });
 
 test("listRunStates normalizes legacy state without rewriting the file", async () => {

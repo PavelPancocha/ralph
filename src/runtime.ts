@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
+import { resolveSpecRoot, specRootRuntimeId } from "./spec-roots.js";
 import type {
   AgentThreadPolicies,
   AgentThreadRefs,
@@ -161,11 +162,18 @@ export function defaultWorkspaceRoot(projectRoot: string): string {
   return path.resolve(projectRoot, "..");
 }
 
-export function buildRuntimePaths(projectRoot: string, workspaceRoot: string): RuntimePaths {
-  const root = path.join(projectRoot, ".ralph");
+export function buildRuntimePaths(projectRoot: string, workspaceRoot: string, specRoot?: string): RuntimePaths {
+  const resolvedSpecRoot = resolveSpecRoot(projectRoot, specRoot);
+  const runtimeId = specRootRuntimeId(projectRoot, resolvedSpecRoot);
+  const root = runtimeId === "default"
+    ? path.join(projectRoot, ".ralph")
+    : path.join(projectRoot, ".ralph", "spec-roots", runtimeId);
   return {
     projectRoot,
     workspaceRoot,
+    specRoot: resolvedSpecRoot,
+    specRootRuntimeId: runtimeId,
+    isDefaultSpecRoot: runtimeId === "default",
     ralphRoot: root,
     runsRoot: path.join(root, "runs"),
     sessionsRoot: path.join(root, "sessions"),
@@ -298,8 +306,8 @@ export async function saveDoneReport(
   return reportPath;
 }
 
-export async function legacyDoneExists(projectRoot: string, spec: SpecDocument): Promise<boolean> {
-  const donePath = path.join(projectRoot, "specs", "done", spec.relFromSpecs);
+export async function legacyDoneExists(specRoot: string, spec: SpecDocument): Promise<boolean> {
+  const donePath = path.join(specRoot, "done", spec.relFromSpecs);
   try {
     await fs.access(donePath);
     return true;
@@ -1084,6 +1092,7 @@ export function runtimeSummary(paths: RuntimePaths): string {
   return [
     `projectRoot=${paths.projectRoot}`,
     `workspaceRoot=${paths.workspaceRoot}`,
+    `specRoot=${paths.specRoot}`,
     `runtimeRoot=${paths.ralphRoot}`,
     `worktreesRoot=${paths.worktreesRoot}`,
   ].join("\n");

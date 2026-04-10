@@ -17,12 +17,14 @@ import {
   runEventLogPath,
   runtimeSummary,
 } from "./runtime.js";
+import { resolveSpecRoot } from "./spec-roots.js";
 import { createSampleSpecFile, discoverSpecPaths, parseSpecFile } from "./specs.js";
 
 export interface ParsedArgs {
   command: "run" | "status" | "inspect" | "create-spec" | "mark-done" | "help";
   specFilters: string[];
   workspaceRoot: string | undefined;
+  specRoot?: string | undefined;
   model: string | undefined;
   maxIterations: number;
   dryRun: boolean;
@@ -80,6 +82,7 @@ export function renderHelpText(): string {
     "  --to <spec>                Run sequentially through the target spec, starting at the first not-done spec",
     "  --resume                   Resume from the latest feasible checkpoint when possible",
     "  --workspace-root <path>    Override the workspace root",
+    "  --spec-root <path>         Override the spec root (relative to Ralph project root or absolute)",
     "  --model <model>            Force all Ralph-managed roles to one model",
     "  --max-iterations <n>       Limit the internal review/fix loop",
     "  -h, --help                 Show this help",
@@ -96,13 +99,14 @@ async function pathExists(targetPath: string): Promise<boolean> {
 }
 
 async function looksLikeProjectRoot(rootPath: string): Promise<boolean> {
-  return (await pathExists(path.join(rootPath, "package.json"))) && (await pathExists(path.join(rootPath, "specs")));
+  return (await pathExists(path.join(rootPath, "package.json")))
+    && ((await pathExists(path.join(rootPath, "src", "cli.ts"))) || (await pathExists(path.join(rootPath, "bin", "ralph.js"))));
 }
 
-async function isSpecAlreadyDone(projectRoot: string, paths: ReturnType<typeof buildRuntimePaths>, relSpec: string): Promise<boolean> {
+async function isSpecAlreadyDone(paths: ReturnType<typeof buildRuntimePaths>, relSpec: string): Promise<boolean> {
   const specId = path.basename(relSpec, ".md");
   const state = await peekRunState(paths, specId);
-  const legacyDonePath = path.join(projectRoot, "specs", "done", relSpec);
+  const legacyDonePath = path.join(paths.specRoot, "done", relSpec);
   return state?.status === "done" || (await pathExists(legacyDonePath));
 }
 
@@ -147,6 +151,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     resume: false,
     toSpec: undefined,
     workspaceRoot: undefined,
+    specRoot: undefined,
     inspectTarget: undefined,
     createSpecTarget: undefined,
     ...(parseError ? { parseError } : {}),
@@ -163,6 +168,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (token === "--workspace-root") {
       args.workspaceRoot = rest[index + 1];
       index += 1;
+      continue;
+    }
+    if (token === "--spec-root") {
+      const specRootValue = rest[index + 1];
+      if (!specRootValue || specRootValue.startsWith("--")) {
+        parseError ??= "Missing --spec-root value";
+      } else {
+        args.specRoot = specRootValue;
+        index += 1;
+      }
       continue;
     }
     if (token === "--model") {
@@ -243,7 +258,8 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
   const workspaceRoot = parsed.workspaceRoot
     ? path.resolve(parsed.workspaceRoot)
     : defaultWorkspaceRoot(projectRoot);
-  const paths = buildRuntimePaths(projectRoot, workspaceRoot);
+  const specRoot = resolveSpecRoot(projectRoot, parsed.specRoot);
+  const paths = buildRuntimePaths(projectRoot, workspaceRoot, specRoot);
   if (!(parsed.command === "run" && parsed.dryRun)) {
     await ensureRuntimePaths(paths);
   }
@@ -267,7 +283,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       console.error("inspect requires a spec path like 1001-example.md");
       return 1;
     }
-    const spec = await parseSpecFile(projectRoot, workspaceRoot, parsed.inspectTarget);
+    const spec = await parseSpecFile(projectRoot, workspaceRoot, parsed.inspectTarget, paths.specRoot);
     console.log(JSON.stringify(spec, null, 2));
     return 0;
   }
@@ -277,7 +293,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       console.error("create-spec requires a target like 1234-example.md or area/1234-example.md");
       return 1;
     }
-    const absolute = await createSampleSpecFile(projectRoot, parsed.createSpecTarget);
+    const absolute = await createSampleSpecFile(projectRoot, parsed.createSpecTarget, paths.specRoot);
     console.log(`Created ${path.relative(projectRoot, absolute).replaceAll(path.sep, "/")}`);
     return 0;
   }
@@ -287,7 +303,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       console.error("mark-done requires a spec path or id like 1001-example.md");
       return 1;
     }
-    const specPaths = await discoverSpecPaths(path.join(projectRoot, "specs"));
+    const specPaths = await discoverSpecPaths(paths.specRoot);
     const matchingTargets = specPaths.filter((specPath) => specPath.includes(parsed.markDoneTarget as string));
     if (matchingTargets.length === 0) {
       console.error(`No specs matched ${parsed.markDoneTarget}.`);
@@ -297,13 +313,13 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       console.error(`${parsed.markDoneTarget} is ambiguous: ${matchingTargets.join(", ")}`);
       return 1;
     }
-    const spec = await parseSpecFile(projectRoot, workspaceRoot, matchingTargets[0]!);
+    const spec = await parseSpecFile(projectRoot, workspaceRoot, matchingTargets[0]!, paths.specRoot);
     await markSpecDone(paths, spec, "Manually marked done outside Ralph.");
     console.log(`Marked ${spec.specId} as done.`);
     return 0;
   }
 
-  const specPaths = await discoverSpecPaths(path.join(projectRoot, "specs"));
+  const specPaths = await discoverSpecPaths(paths.specRoot);
   const filtered = parsed.specFilters.length > 0
     ? specPaths.filter((specPath) => parsed.specFilters.some((filter) => specPath.includes(filter)))
     : specPaths;
@@ -326,7 +342,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
     const bounded = filtered.slice(0, filtered.indexOf(targetPath) + 1);
     let firstPendingIndex = bounded.length;
     for (const [index, relSpec] of bounded.entries()) {
-      const done = await isSpecAlreadyDone(projectRoot, paths, relSpec);
+      const done = await isSpecAlreadyDone(paths, relSpec);
       if (!done) {
         firstPendingIndex = index;
         break;
@@ -338,7 +354,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
 
   const selected: string[] = [];
   for (const relSpec of selectionPool) {
-    if (await isSpecAlreadyDone(projectRoot, paths, relSpec)) {
+    if (await isSpecAlreadyDone(paths, relSpec)) {
       skippedDueToDone.push(relSpec);
       continue;
     }
@@ -385,7 +401,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       : `Running ${selected.length} spec(s) with smart role policy maxIterations=${parsed.maxIterations}${parsed.resume ? " resume=true" : ""}`,
   );
   for (const [index, relSpec] of selected.entries()) {
-    const spec = await parseSpecFile(projectRoot, workspaceRoot, relSpec);
+    const spec = await parseSpecFile(projectRoot, workspaceRoot, relSpec, paths.specRoot);
     const specIndex = index + 1;
     console.log(`\n[${specIndex}/${selected.length}] ${spec.specId} :: ${spec.title}`);
     let printedLogPath = false;

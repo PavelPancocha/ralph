@@ -2,6 +2,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { z } from "zod";
 
+import { defaultSpecRoot } from "./spec-roots.js";
 import type { BranchInstructions, SpecDocument } from "./types.js";
 
 const SPEC_FILE_RE = /^\d{4,}-.*\.md$/;
@@ -247,8 +248,12 @@ export function buildSampleSpecTemplate(relFromSpecs: string): string {
   ].join("\n");
 }
 
-export async function createSampleSpecFile(projectRoot: string, relFromSpecs: string): Promise<string> {
-  const absolute = path.join(projectRoot, "specs", relFromSpecs);
+export async function createSampleSpecFile(
+  projectRoot: string,
+  relFromSpecs: string,
+  specsRoot = defaultSpecRoot(projectRoot),
+): Promise<string> {
+  const absolute = path.join(specsRoot, relFromSpecs);
   await fs.mkdir(path.dirname(absolute), { recursive: true });
   try {
     await fs.access(absolute);
@@ -300,8 +305,8 @@ export async function parseSpecFile(
   projectRoot: string,
   workspaceRoot: string,
   relFromSpecs: string,
+  specsRoot = defaultSpecRoot(projectRoot),
 ): Promise<SpecDocument> {
-  const specsRoot = path.join(projectRoot, "specs");
   const specPath = path.join(specsRoot, relFromSpecs);
   const raw = await fs.readFile(specPath, "utf8");
   const sections = parseSections(raw);

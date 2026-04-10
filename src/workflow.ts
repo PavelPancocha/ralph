@@ -869,9 +869,9 @@ async function analyzeDryRunSourceBranch(
     return null;
   }
 
-  const specPaths = await discoverSpecPaths(path.join(paths.projectRoot, "specs"));
+  const specPaths = await discoverSpecPaths(paths.specRoot);
   const parsedSpecs = await Promise.all(
-    specPaths.map((relFromSpecs) => parseSpecFile(paths.projectRoot, paths.workspaceRoot, relFromSpecs)),
+    specPaths.map((relFromSpecs) => parseSpecFile(paths.projectRoot, paths.workspaceRoot, relFromSpecs, paths.specRoot)),
   );
   const currentIndex = parsedSpecs.findIndex((candidate) => candidate.relFromSpecs === spec.relFromSpecs);
   const sourceProducer = parsedSpecs.find(
@@ -971,7 +971,7 @@ export async function executeSpec(
   deps: WorkflowDependencies = {},
 ): Promise<SupervisorOutcome> {
   const repoPath = await resolveRepoPath(paths, spec);
-  const legacyDone = await legacyDoneExists(paths.projectRoot, spec);
+  const legacyDone = await legacyDoneExists(paths.specRoot, spec);
   let state = ((options.dryRun ? await peekRunState(paths, spec.specId) : await loadRunState(paths, spec.specId)))
     ?? initialRunState(spec, legacyDone);
   if (state.status === "done") {
