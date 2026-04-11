@@ -5,11 +5,15 @@ export function defaultSpecRoot(projectRoot: string): string {
   return path.join(projectRoot, "specs");
 }
 
+export function resolvePathFromProjectRoot(projectRoot: string, targetPath: string): string {
+  return path.resolve(projectRoot, targetPath);
+}
+
 export function resolveSpecRoot(projectRoot: string, specRoot?: string): string {
   if (!specRoot) {
     return defaultSpecRoot(projectRoot);
   }
-  return path.resolve(projectRoot, specRoot);
+  return resolvePathFromProjectRoot(projectRoot, specRoot);
 }
 
 export function isDefaultSpecRoot(projectRoot: string, specRoot: string): boolean {

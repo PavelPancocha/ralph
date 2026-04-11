@@ -214,53 +214,69 @@ test("runCommand prints help for --help", async () => {
   assert.match(logOutput, /Commands:\s+run, status, inspect, create-spec, mark-done/);
 });
 
-test("runCommand rejects root checkout mode when more than one spec would run", async () => {
+test("runCommand allows root checkout mode when more than one spec would run", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-root-mode-"));
   await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
   await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
   await writeRunnableSpec(tempRoot, "1002-two.md", "1002 - Two");
-
-  let errorOutput = "";
-  const originalError = console.error;
   const previousCwd = process.cwd();
-  console.error = (message?: unknown) => {
-    errorOutput += `${String(message)}\n`;
-  };
+  const executedSpecIds: string[] = [];
+
   process.chdir(tempRoot);
   try {
-    const exitCode = await runCommand(parseArgs(["run", "--checkout-mode", "root"]));
-    assert.equal(exitCode, 1);
+    const exitCode = await runCommand(
+      parseArgs(["run", "--checkout-mode", "root", "--dry-run"]),
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          executedSpecIds.push(spec.specId);
+          return {
+            status: "needs_more_work",
+            summary: "Dry run prepared checkout.",
+            candidateCommit: undefined,
+            nextAction: "re-run",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
   } finally {
     process.chdir(previousCwd);
-    console.error = originalError;
   }
 
-  assert.match(errorOutput, /checkout-mode root/i);
-  assert.match(errorOutput, /single spec/i);
+  assert.deepEqual(executedSpecIds, ["1001-one", "1002-two"]);
 });
 
-test("runCommand rejects --to when root checkout mode is requested", async () => {
+test("runCommand allows --to when root checkout mode is requested", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-root-to-"));
   await fs.mkdir(path.join(tempRoot, "specs"), { recursive: true });
   await writeRunnableSpec(tempRoot, "1001-one.md", "1001 - One");
+  await writeRunnableSpec(tempRoot, "1002-two.md", "1002 - Two");
+  await writeRunnableSpec(tempRoot, "1003-three.md", "1003 - Three");
+  const executedSpecIds: string[] = [];
 
-  let errorOutput = "";
-  const originalError = console.error;
   const previousCwd = process.cwd();
-  console.error = (message?: unknown) => {
-    errorOutput += `${String(message)}\n`;
-  };
   process.chdir(tempRoot);
   try {
-    const exitCode = await runCommand(parseArgs(["run", "--checkout-mode", "root", "--to", "1001"]));
-    assert.equal(exitCode, 1);
+    const exitCode = await runCommand(
+      parseArgs(["run", "--checkout-mode", "root", "--to", "1002", "--dry-run"]),
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          executedSpecIds.push(spec.specId);
+          return {
+            status: "needs_more_work",
+            summary: "Dry run prepared checkout.",
+            candidateCommit: undefined,
+            nextAction: "re-run",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
   } finally {
     process.chdir(previousCwd);
-    console.error = originalError;
   }
 
-  assert.match(errorOutput, /checkout-mode root/i);
-  assert.match(errorOutput, /--to/);
+  assert.deepEqual(executedSpecIds, ["1001-one", "1002-two"]);
 });
 
 test("create-spec scaffolds a spec with required and recommended sections", async () => {
@@ -641,6 +657,74 @@ test("runCommand auto-detects a nested ralph project root when invoked from the 
   }
 
   assert.equal(executedSpecId, "1001-one");
+});
+
+test("runCommand resolves --workspace-root relative to the Ralph project root", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-workspace-root-"));
+  const projectRoot = path.join(tempRoot, "ralph");
+  const expectedWorkspaceRoot = path.join(tempRoot, "zemtu");
+  const customSpecsRoot = path.join(expectedWorkspaceRoot, "docs", "specs", "payment-toolbox");
+  const previousCwd = process.cwd();
+  let seenWorkspaceRoot: string | undefined;
+
+  await scaffoldProjectRoot(projectRoot);
+  await fs.mkdir(expectedWorkspaceRoot, { recursive: true });
+  await fs.mkdir(customSpecsRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(customSpecsRoot, "2003-stop-runtime-effective-date-usage.md"),
+    `# 2003 - Stop Runtime Effective-Date Usage
+
+Repo: zemtu
+Workdir: .
+
+## Branch Instructions
+- Source branch: \`main\`
+- Create branch: \`feature/payment-toolbox/2003-stop-runtime-effective-date-usage\`
+
+## Goal
+Exercise workspace-root resolution.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+
+  process.chdir(tempRoot);
+  try {
+    const exitCode = await runCommand(
+      {
+        command: "run",
+        specFilters: ["2003"],
+        workspaceRoot: "../zemtu",
+        specRoot: "../zemtu/docs/specs/payment-toolbox",
+        model: undefined,
+        maxIterations: 3,
+        dryRun: true,
+        toSpec: undefined,
+        inspectTarget: undefined,
+        createSpecTarget: undefined,
+      },
+      {
+        executeSpec: async (paths) => {
+          seenWorkspaceRoot = paths.workspaceRoot;
+          return {
+            status: "needs_more_work",
+            summary: "Dry run prepared checkout.",
+            candidateCommit: undefined,
+            nextAction: "re-run",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+  }
+
+  assert.equal(seenWorkspaceRoot, expectedWorkspaceRoot);
 });
 
 test("runCommand discovers specs from a custom spec root", async () => {

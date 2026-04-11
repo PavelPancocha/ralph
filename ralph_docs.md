@@ -11,7 +11,7 @@ Ralph is a local spec runner that:
 - reads markdown specs from `specs/` by default, or from a custom `--spec-root`
 - resolves the target repository from `Repo:` and `Workdir:`
 - creates one isolated git worktree per spec by default
-- supports a single-spec `--checkout-mode root` override for repos whose Docker setup is not worktree-safe
+- supports `--checkout-mode root` for repos whose Docker setup is not worktree-safe
 - runs a supervised multi-agent Codex workflow
 - stores runtime state and artifacts under `.ralph/`
 - marks successful specs with a done report under `.ralph/reports/done/`
@@ -330,13 +330,13 @@ After worktree creation, Ralph copies `codex-support/` into:
 
 That gives every spec run its own local Codex hook/config bundle.
 
-`--checkout-mode root` is a single-spec override for repositories where Docker, bind mounts, or compose project naming make Ralph worktrees unusable. In this mode Ralph:
+`--checkout-mode root` is the fallback for repositories where Docker, bind mounts, or compose project naming make Ralph worktrees unusable. In this mode Ralph:
 
 - reuses the repository root itself as the active checkout
-- rejects `--to` and any multi-spec selection
+- supports the same spec-selection shapes as ordinary runs, including `--to`
 - requires a clean repository and refuses detached HEAD
-- checks out or creates the spec feature branch directly in the repo root
-- leaves the repo on that feature branch after setup and after the run
+- checks out or creates each spec feature branch directly in the repo root
+- leaves the repo on the last processed branch after setup and after the run
 - refuses to overwrite an existing user-owned `.codex/` directory in the repo root
 - exposes `/var/run` to implementer and reviewer sandboxes when the spec's verification commands reference Docker
 
@@ -426,6 +426,7 @@ npm run dev -- 1001-demo
 npm run dev -- --dry-run
 npm run dev -- --dryrun
 npm run dev -- --spec-root ../zemtu/docs/plans/payment-toolbox/specs --dry-run
+npm run dev -- --workspace-root ../zemtu --spec-root ../zemtu/docs/specs/payment-toolbox --dry-run 2003-stop-runtime-effective-date-usage
 npm run dev -- 2003-stop-runtime-effective-date-usage --checkout-mode root
 ```
 
@@ -539,6 +540,7 @@ The workflow file is:
 - Ralph is local-first. It expects to operate on repositories already present in the workspace.
 - The CLI exposes `run`, `status`, `inspect`, and `create-spec`. There is no dedicated `resume` command yet because persistent state plus stable worktree paths already provide the base for restart-safe execution.
 - `--to <spec>` is the built-in bounded batch operator flow for sequential backlog execution.
+- `--workspace-root <path>` accepts either an absolute path or a path relative to the Ralph project root.
 - `--spec-root <path>` accepts either an absolute path or a path relative to the Ralph project root. Positional spec paths remain relative to that selected spec root.
 - `--dry-run` is intentionally non-persistent: no `.ralph/` writes happen during dry-run.
 - The current review loop is capped by `--max-iterations` (default: `5`).

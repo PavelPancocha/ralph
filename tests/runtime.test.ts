@@ -356,6 +356,41 @@ test("prepareRootCheckout creates a missing feature branch from the declared sou
   assert.equal(createdBranchHead.trim(), sourceBranchHead.trim());
 });
 
+test("prepareRootCheckout can advance sequentially across stacked root-mode branches", async () => {
+  const { repoRoot, paths, spec } = await createRuntimeFixture();
+  const firstSpec = {
+    ...spec,
+    branchInstructions: {
+      ...spec.branchInstructions,
+      createBranch: "feature/root-first",
+    },
+  };
+  const secondSpec = {
+    ...spec,
+    specId: "1002-example",
+    relFromSpecs: "1002-example.md",
+    branchInstructions: {
+      sourceBranch: "feature/root-first",
+      createBranch: "feature/root-second",
+    },
+  };
+
+  await prepareRootCheckout(paths, firstSpec, repoRoot);
+  const { stdout: firstBranchName } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
+  const { stdout: firstBranchHead } = await execFile("git", ["-C", repoRoot, "rev-parse", "HEAD"]);
+  const { stdout: firstSourceHead } = await execFile("git", ["-C", repoRoot, "rev-parse", firstSpec.branchInstructions.sourceBranch]);
+
+  await prepareRootCheckout(paths, secondSpec, repoRoot);
+  const { stdout: secondBranchName } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
+  const { stdout: secondBranchHead } = await execFile("git", ["-C", repoRoot, "rev-parse", "HEAD"]);
+  const { stdout: secondSourceHead } = await execFile("git", ["-C", repoRoot, "rev-parse", secondSpec.branchInstructions.sourceBranch]);
+
+  assert.equal(firstBranchName.trim(), firstSpec.branchInstructions.createBranch);
+  assert.equal(firstBranchHead.trim(), firstSourceHead.trim());
+  assert.equal(secondBranchName.trim(), secondSpec.branchInstructions.createBranch);
+  assert.equal(secondBranchHead.trim(), secondSourceHead.trim());
+});
+
 test("prepareRootCheckout fails fast on dirty repo state", async () => {
   const { repoRoot, paths, spec } = await createRuntimeFixture();
   await fs.writeFile(path.join(repoRoot, "DIRTY.txt"), "dirty\n", "utf8");

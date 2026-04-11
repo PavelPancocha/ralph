@@ -1,6 +1,6 @@
 # Ralph
 
-Ralph is a spec-driven development runner built around the official Codex SDK. It reads markdown specs from `specs/` by default, or from a custom `--spec-root`, uses an isolated git worktree per spec by default, and executes a supervised multi-agent loop until the spec is either completed or fails review. For repos whose Docker setup is not worktree-safe, Ralph also supports a single-spec `--checkout-mode root` override that runs directly in the repository root checkout.
+Ralph is a spec-driven development runner built around the official Codex SDK. It reads markdown specs from `specs/` by default, or from a custom `--spec-root`, uses an isolated git worktree per spec by default, and executes a supervised multi-agent loop until the spec is either completed or fails review. For repos whose Docker setup is not worktree-safe, Ralph also supports `--checkout-mode root`, which runs directly in the repository root checkout.
 
 This repository is the v2 rewrite. The old Python runner still exists in the tree, but the active implementation documented here is the Node/TypeScript CLI under [`src/`](./src).
 
@@ -110,6 +110,7 @@ npm run dev -- --to 1003
 
 # Override workspace root
 npm run dev -- --workspace-root /path/to/workspace
+npm run dev -- --workspace-root ../zemtu --spec-root ../zemtu/docs/specs/payment-toolbox --dry-run 2003-stop-runtime-effective-date-usage
 
 # Override spec root
 npm run dev -- --spec-root ../zemtu/docs/plans/payment-toolbox/specs
@@ -208,7 +209,7 @@ If a spec in that rerun range has already failed once, Ralph seeds the next atte
 
 `--resume` continues a previously started spec run from the latest feasible checkpoint instead of replaying the whole workflow from scratch. Ralph prefers the most advanced saved stage it can reconstruct from the run state and artifacts, restores the saved planning context when it is available, and then continues from there with the existing thread history when the saved policy still matches. The durable checkpoint pointer is only advanced after a new structured artifact is written, so an early setup failure does not make Ralph forget the last resumable run. It also prints a small checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or had to fall back to a fresh run.
 
-`--checkout-mode worktree` is the default. `--checkout-mode root` is an explicit single-spec override for repos whose Docker or compose setup cannot run correctly from a Ralph worktree. Root mode rejects `--to` and multi-spec runs, requires a clean non-detached repo checkout, leaves the repo on the feature branch after setup, reuses the repo root itself as the active checkout, and exposes `/var/run` to implementer and reviewer sandboxes when the spec's verification commands reference Docker.
+`--checkout-mode worktree` is the default. `--checkout-mode root` is the fallback for repos whose Docker or compose setup cannot run correctly from a Ralph worktree. Root mode reuses the repo root itself as the active checkout for each selected spec, supports the same selection shapes as ordinary runs (including `--to`), requires a clean non-detached repo checkout before each spec setup, leaves the repo on the last processed branch, and exposes `/var/run` to implementer and reviewer sandboxes when the spec's verification commands reference Docker.
 
 `--dry-run` is truly read-only. It does not create worktrees, switch a repo root checkout, create runtime state, write event logs or artifacts, or seed `codex-home`. It only validates dry-run preconditions and prints what Ralph would do.
 
@@ -283,7 +284,7 @@ npm run dev -- create-spec area/1235-follow-up-spec.md
 npm run dev -- create-spec --spec-root ../zemtu/docs/plans/payment-toolbox/specs 1001-payment-toolbox.md
 ```
 
-`--spec-root` accepts either an absolute path or a path relative to the Ralph project root. The positional spec path remains relative to the selected spec root.
+`--workspace-root` and `--spec-root` accept either an absolute path or a path relative to the Ralph project root. The positional spec path remains relative to the selected spec root.
 
 For a runnable spec, the parser currently requires:
 

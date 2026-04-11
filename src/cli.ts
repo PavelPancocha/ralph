@@ -17,7 +17,7 @@ import {
   runEventLogPath,
   runtimeSummary,
 } from "./runtime.js";
-import { resolveSpecRoot } from "./spec-roots.js";
+import { resolvePathFromProjectRoot, resolveSpecRoot } from "./spec-roots.js";
 import { createSampleSpecFile, discoverSpecPaths, parseSpecFile } from "./specs.js";
 
 export interface ParsedArgs {
@@ -82,7 +82,7 @@ export function renderHelpText(): string {
     "  --dry-run, --dryrun        Preview matching specs without running Codex",
     "  --to <spec>                Run sequentially through the target spec, starting at the first not-done spec",
     "  --resume                   Resume from the latest feasible checkpoint when possible",
-    "  --workspace-root <path>    Override the workspace root",
+    "  --workspace-root <path>    Override the workspace root (relative to Ralph project root or absolute)",
     "  --spec-root <path>         Override the spec root (relative to Ralph project root or absolute)",
     "  --checkout-mode <worktree|root>  Choose isolated worktrees (default) or the repo root checkout",
     "  --model <model>            Force all Ralph-managed roles to one model",
@@ -271,7 +271,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
 
   const projectRoot = await resolveProjectRoot(process.cwd());
   const workspaceRoot = parsed.workspaceRoot
-    ? path.resolve(parsed.workspaceRoot)
+    ? resolvePathFromProjectRoot(projectRoot, parsed.workspaceRoot)
     : defaultWorkspaceRoot(projectRoot);
   const specRoot = resolveSpecRoot(projectRoot, parsed.specRoot);
   const paths = buildRuntimePaths(projectRoot, workspaceRoot, specRoot);
@@ -392,15 +392,6 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
   }
 
   const checkoutMode = parsed.checkoutMode ?? "worktree";
-  if (checkoutMode === "root" && parsed.toSpec) {
-    console.error("`--checkout-mode root` does not support `--to`; root mode is limited to a single explicit spec run.");
-    return 1;
-  }
-  if (checkoutMode === "root" && selected.length !== 1) {
-    console.error("`--checkout-mode root` requires a single spec selection; narrow the filters so only one spec will run.");
-    return 1;
-  }
-
   const options: RalphRunOptions = {
     workspaceRoot,
     projectRoot,
