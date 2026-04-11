@@ -1,11 +1,36 @@
 import path from "node:path";
+import { execFile as execFileCb } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { promisify } from "node:util";
 import { z } from "zod";
 
 import { defaultSpecRoot } from "./spec-roots.js";
 import type { BranchInstructions, SpecDocument } from "./types.js";
 
 const SPEC_FILE_RE = /^\d{4,}-.*\.md$/;
+const legacySpecDirs = new Set(["done", "plans", "sessions", "candidates"]);
+const execFile = promisify(execFileCb);
+
+interface SpecReadOptions {
+  onWarning?: (message: string) => void;
+}
+
+type SpecSource =
+  | {
+      kind: "filesystem";
+      specsRoot: string;
+      warning?: string;
+    }
+  | {
+      kind: "git-fallback";
+      specsRoot: string;
+      repoRoot: string;
+      repoRelativeSpecsRoot: string;
+      ref: string;
+      warning: string;
+    };
+
+const specSourceCache = new Map<string, Promise<SpecSource>>();
 
 const branchInstructionsSchema = z.object({
   sourceBranch: z.string().min(1),
@@ -159,8 +184,7 @@ function parseBranchInstructions(block: string | undefined): BranchInstructions 
   };
 }
 
-async function isRunnableSpecFile(absolute: string): Promise<boolean> {
-  const raw = await fs.readFile(absolute, "utf8");
+function isRunnableSpecContent(raw: string): boolean {
   const lines = raw.split("\n").map(normalizeLine);
   const repoLine = lines.find((line) => line.startsWith("Repo:"));
   const workdirLine = lines.find((line) => line.startsWith("Workdir:"));
@@ -175,6 +199,170 @@ async function isRunnableSpecFile(absolute: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function isRunnableSpecFile(absolute: string): Promise<boolean> {
+  return isRunnableSpecContent(await fs.readFile(absolute, "utf8"));
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function findExistingAncestor(targetPath: string): Promise<string | null> {
+  let current = path.resolve(targetPath);
+  while (true) {
+    if (await pathExists(current)) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+async function readGitStdout(repoPath: string, args: string[]): Promise<string> {
+  const { stdout } = await execFile("git", ["-C", repoPath, ...args]);
+  return stdout.trim();
+}
+
+function displayGitRef(ref: string): string {
+  return ref.startsWith("refs/remotes/") ? ref.replace(/^refs\/remotes\//, "") : ref;
+}
+
+function pathInsideRoot(rootPath: string, targetPath: string): boolean {
+  const relative = path.relative(rootPath, targetPath);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`));
+}
+
+function applySpecSourceWarning(source: SpecSource, options?: SpecReadOptions): void {
+  if (source.warning) {
+    options?.onWarning?.(source.warning);
+  }
+}
+
+async function listGitSpecFiles(source: Extract<SpecSource, { kind: "git-fallback" }>): Promise<string[]> {
+  const { stdout } = await execFile("git", [
+    "-C",
+    source.repoRoot,
+    "ls-tree",
+    "-r",
+    "--name-only",
+    source.ref,
+    "--",
+    source.repoRelativeSpecsRoot,
+  ]);
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((repoRelativePath) => path.posix.relative(source.repoRelativeSpecsRoot, repoRelativePath))
+    .filter((relFromSpecs) => relFromSpecs && relFromSpecs !== ".");
+}
+
+async function readGitSpecContent(
+  source: Extract<SpecSource, { kind: "git-fallback" }>,
+  relFromSpecs: string,
+): Promise<string> {
+  const repoRelativePath = path.posix.join(
+    source.repoRelativeSpecsRoot.replaceAll(path.sep, "/"),
+    relFromSpecs.replaceAll(path.sep, "/"),
+  );
+  const { stdout } = await execFile("git", [
+    "-C",
+    source.repoRoot,
+    "show",
+    `${source.ref}:${repoRelativePath}`,
+  ]);
+  return stdout;
+}
+
+async function resolveSpecSource(specsRoot: string): Promise<SpecSource> {
+  const resolvedSpecsRoot = path.resolve(specsRoot);
+  const cached = specSourceCache.get(resolvedSpecsRoot);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = (async (): Promise<SpecSource> => {
+    try {
+      const stat = await fs.stat(resolvedSpecsRoot);
+      if (stat.isDirectory()) {
+        return {
+          kind: "filesystem",
+          specsRoot: resolvedSpecsRoot,
+        };
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    const ancestor = await findExistingAncestor(path.dirname(resolvedSpecsRoot));
+    if (!ancestor) {
+      throw new Error(`Spec root does not exist: ${resolvedSpecsRoot}`);
+    }
+
+    let repoRoot: string;
+    try {
+      repoRoot = await readGitStdout(ancestor, ["rev-parse", "--show-toplevel"]);
+    } catch {
+      throw new Error(`Spec root does not exist: ${resolvedSpecsRoot}`);
+    }
+
+    if (!pathInsideRoot(repoRoot, resolvedSpecsRoot)) {
+      throw new Error(`Spec root does not exist: ${resolvedSpecsRoot}`);
+    }
+
+    let fallbackRef: string;
+    try {
+      fallbackRef = await readGitStdout(repoRoot, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+    } catch {
+      throw new Error(
+        `Spec root ${resolvedSpecsRoot} is missing on the current checkout, and origin/HEAD is not available for fallback.`,
+      );
+    }
+
+    const repoRelativeSpecsRoot = path.relative(repoRoot, resolvedSpecsRoot).replaceAll(path.sep, "/");
+    const files = await listGitSpecFiles({
+      kind: "git-fallback",
+      specsRoot: resolvedSpecsRoot,
+      repoRoot,
+      repoRelativeSpecsRoot,
+      ref: fallbackRef,
+      warning: "",
+    });
+    if (files.length === 0) {
+      throw new Error(
+        `Spec root ${resolvedSpecsRoot} is missing on the current checkout and is also absent in ${displayGitRef(fallbackRef)}.`,
+      );
+    }
+
+    return {
+      kind: "git-fallback",
+      specsRoot: resolvedSpecsRoot,
+      repoRoot,
+      repoRelativeSpecsRoot,
+      ref: fallbackRef,
+      warning: `Spec root ${resolvedSpecsRoot} is missing on the current checkout; reading specs from ${displayGitRef(fallbackRef)} instead.`,
+    };
+  })();
+
+  specSourceCache.set(resolvedSpecsRoot, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    specSourceCache.delete(resolvedSpecsRoot);
+    throw error;
   }
 }
 
@@ -267,8 +455,30 @@ export async function createSampleSpecFile(
   throw new Error(`Spec already exists: ${relFromSpecs}`);
 }
 
-export async function discoverSpecPaths(specsRoot: string): Promise<string[]> {
+export async function discoverSpecPaths(specsRoot: string, options?: SpecReadOptions): Promise<string[]> {
+  const source = await resolveSpecSource(specsRoot);
+  applySpecSourceWarning(source, options);
   const result: string[] = [];
+
+  if (source.kind === "git-fallback") {
+    const files = await listGitSpecFiles(source);
+    for (const relFromSpecs of files) {
+      const segments = relFromSpecs.split("/");
+      if (segments.some((segment) => legacySpecDirs.has(segment))) {
+        continue;
+      }
+      const fileName = path.posix.basename(relFromSpecs);
+      if (!SPEC_FILE_RE.test(fileName)) {
+        continue;
+      }
+      if (!isRunnableSpecContent(await readGitSpecContent(source, relFromSpecs))) {
+        continue;
+      }
+      result.push(relFromSpecs);
+    }
+    result.sort((a, b) => a.localeCompare(b));
+    return result;
+  }
 
   async function walk(current: string): Promise<void> {
     const entries = await fs.readdir(current, { withFileTypes: true });
@@ -276,9 +486,9 @@ export async function discoverSpecPaths(specsRoot: string): Promise<string[]> {
 
     for (const entry of entries) {
       const absolute = path.join(current, entry.name);
-      const relFromSpecs = path.relative(specsRoot, absolute).replaceAll(path.sep, "/");
+      const relFromSpecs = path.relative(source.specsRoot, absolute).replaceAll(path.sep, "/");
       if (entry.isDirectory()) {
-        if (["done", "plans", "sessions", "candidates"].includes(entry.name)) {
+        if (legacySpecDirs.has(entry.name)) {
           continue;
         }
         await walk(absolute);
@@ -297,7 +507,7 @@ export async function discoverSpecPaths(specsRoot: string): Promise<string[]> {
     }
   }
 
-  await walk(specsRoot);
+  await walk(source.specsRoot);
   return result;
 }
 
@@ -306,9 +516,14 @@ export async function parseSpecFile(
   workspaceRoot: string,
   relFromSpecs: string,
   specsRoot = defaultSpecRoot(projectRoot),
+  options?: SpecReadOptions,
 ): Promise<SpecDocument> {
-  const specPath = path.join(specsRoot, relFromSpecs);
-  const raw = await fs.readFile(specPath, "utf8");
+  const source = await resolveSpecSource(specsRoot);
+  applySpecSourceWarning(source, options);
+  const specPath = path.join(source.specsRoot, relFromSpecs);
+  const raw = source.kind === "filesystem"
+    ? await fs.readFile(specPath, "utf8")
+    : await readGitSpecContent(source, relFromSpecs);
   const sections = parseSections(raw);
 
   const lines = raw.split("\n").map(normalizeLine);

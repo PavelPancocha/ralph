@@ -284,7 +284,7 @@ npm run dev -- create-spec area/1235-follow-up-spec.md
 npm run dev -- create-spec --spec-root ../zemtu/docs/plans/payment-toolbox/specs 1001-payment-toolbox.md
 ```
 
-`--workspace-root` and `--spec-root` accept either an absolute path or a path relative to the Ralph project root. The positional spec path remains relative to the selected spec root.
+`--workspace-root` and `--spec-root` accept either an absolute path or a path relative to the Ralph project root. The positional spec path remains relative to the selected spec root. When a custom spec root lives inside the target repo and is missing on the current checkout, Ralph automatically falls back to reading specs from `origin/HEAD` and prints a warning naming the fallback ref.
 
 For a runnable spec, the parser currently requires:
 

@@ -2,9 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
+import { execFile as execFileCb } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { promisify } from "node:util";
 
 import { discoverSpecPaths, parseSpecFile } from "../src/specs.js";
+
+const execFile = promisify(execFileCb);
 
 async function createTempSpecProject(): Promise<{
   projectRoot: string;
@@ -18,6 +22,58 @@ async function createTempSpecProject(): Promise<{
   await fs.mkdir(path.join(specsRoot, "done"), { recursive: true });
   await fs.mkdir(path.join(specsRoot, "plans"), { recursive: true });
   return { projectRoot, workspaceRoot, specsRoot };
+}
+
+async function createGitFallbackSpecProject(): Promise<{
+  projectRoot: string;
+  workspaceRoot: string;
+  repoRoot: string;
+  specsRoot: string;
+}> {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-specs-git-fallback-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const repoRoot = path.join(workspaceRoot, "zemtu");
+  const specsRoot = path.join(repoRoot, "docs", "specs", "payment-toolbox");
+
+  await fs.mkdir(specsRoot, { recursive: true });
+  await execFile("git", ["init", "-b", "dev"], { cwd: repoRoot });
+  await execFile("git", ["config", "user.email", "ralph@example.com"], { cwd: repoRoot });
+  await execFile("git", ["config", "user.name", "Ralph Test"], { cwd: repoRoot });
+
+  const runnable = `# 2003 - Stop Runtime Effective-Date Usage
+
+Repo: zemtu
+Workdir: .
+
+## Branch Instructions
+- Source branch: \`dev\`
+- Create branch: \`feature/payment-toolbox/2003-stop-runtime-effective-date-usage\`
+
+## Goal
+Ship the change.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`;
+  const second = runnable
+    .replace("# 2003 - Stop Runtime Effective-Date Usage", "# 2004 - coverage_guard: Define CoverageDecisionRecord")
+    .replace("feature/payment-toolbox/2003-stop-runtime-effective-date-usage", "feature/payment-toolbox/2004-define-coverage-decision-record");
+
+  await fs.writeFile(path.join(specsRoot, "2003-stop-runtime-effective-date-usage.md"), runnable, "utf8");
+  await fs.writeFile(path.join(specsRoot, "2004-coverage_guard-define-coverage-decision-record.md"), second, "utf8");
+  await execFile("git", ["add", "."], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "add payment toolbox specs"], { cwd: repoRoot });
+  const { stdout: devCommit } = await execFile("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+  await execFile("git", ["update-ref", "refs/remotes/origin/dev", devCommit.trim()], { cwd: repoRoot });
+  await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/dev"], { cwd: repoRoot });
+  await execFile("git", ["checkout", "-b", "feature/missing-spec-root"], { cwd: repoRoot });
+  await fs.rm(path.join(repoRoot, "docs"), { recursive: true, force: true });
+  await execFile("git", ["add", "-A"], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "remove specs from branch"], { cwd: repoRoot });
+
+  return { projectRoot, workspaceRoot, repoRoot, specsRoot };
 }
 
 test("discoverSpecPaths ignores legacy state directories and unrunnable spec-like files", async () => {
@@ -145,5 +201,69 @@ Workdir:
   await assert.rejects(
     parseSpecFile(projectRoot, workspaceRoot, "1003-empty-values.md"),
     /must provide non-empty Repo: and Workdir: values/,
+  );
+});
+
+test("discoverSpecPaths falls back to origin/HEAD when the live spec root is missing", async () => {
+  const { specsRoot } = await createGitFallbackSpecProject();
+  const warnings: string[] = [];
+
+  const specs = await discoverSpecPaths(specsRoot, {
+    onWarning: (message) => {
+      warnings.push(message);
+    },
+  });
+
+  assert.deepEqual(specs, [
+    "2003-stop-runtime-effective-date-usage.md",
+    "2004-coverage_guard-define-coverage-decision-record.md",
+  ]);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /origin\/dev/);
+});
+
+test("parseSpecFile falls back to origin/HEAD when the live spec root is missing", async () => {
+  const { projectRoot, workspaceRoot, specsRoot } = await createGitFallbackSpecProject();
+  const warnings: string[] = [];
+
+  const spec = await parseSpecFile(
+    projectRoot,
+    workspaceRoot,
+    "2004-coverage_guard-define-coverage-decision-record.md",
+    specsRoot,
+    {
+      onWarning: (message) => {
+        warnings.push(message);
+      },
+    },
+  );
+
+  assert.equal(spec.specId, "2004-coverage_guard-define-coverage-decision-record");
+  assert.equal(spec.repo, "zemtu");
+  assert.equal(spec.workdir, ".");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /origin\/dev/);
+});
+
+test("discoverSpecPaths fails clearly when fallback ref is unavailable", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-specs-git-missing-fallback-"));
+  const repoRoot = path.join(workspaceRoot, "zemtu");
+  const specsRoot = path.join(repoRoot, "docs", "specs", "payment-toolbox");
+
+  await fs.mkdir(specsRoot, { recursive: true });
+  await execFile("git", ["init", "-b", "dev"], { cwd: repoRoot });
+  await execFile("git", ["config", "user.email", "ralph@example.com"], { cwd: repoRoot });
+  await execFile("git", ["config", "user.name", "Ralph Test"], { cwd: repoRoot });
+  await fs.writeFile(path.join(specsRoot, "2003-stop-runtime-effective-date-usage.md"), "# draft\n", "utf8");
+  await execFile("git", ["add", "."], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "add draft spec root"], { cwd: repoRoot });
+  await execFile("git", ["checkout", "-b", "feature/missing-spec-root"], { cwd: repoRoot });
+  await fs.rm(path.join(repoRoot, "docs"), { recursive: true, force: true });
+  await execFile("git", ["add", "-A"], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "remove specs from branch"], { cwd: repoRoot });
+
+  await assert.rejects(
+    discoverSpecPaths(specsRoot),
+    /origin\/HEAD is not available/,
   );
 });

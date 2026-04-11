@@ -62,6 +62,76 @@ async function scaffoldProjectRoot(projectRoot: string): Promise<void> {
   await fs.writeFile(path.join(projectRoot, "src", "cli.ts"), "export {};\n", "utf8");
 }
 
+async function createCliGitFallbackFixture(): Promise<{
+  workspaceRoot: string;
+  projectRoot: string;
+  repoRoot: string;
+}> {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-git-fallback-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const repoRoot = path.join(workspaceRoot, "zemtu");
+  const specsRoot = path.join(repoRoot, "docs", "specs", "payment-toolbox");
+
+  await scaffoldProjectRoot(projectRoot);
+  await fs.mkdir(specsRoot, { recursive: true });
+  await execFile("git", ["init", "-b", "dev"], { cwd: repoRoot });
+  await execFile("git", ["config", "user.email", "ralph@example.com"], { cwd: repoRoot });
+  await execFile("git", ["config", "user.name", "Ralph Test"], { cwd: repoRoot });
+  await fs.writeFile(
+    path.join(specsRoot, "2003-stop-runtime-effective-date-usage.md"),
+    `# 2003 - Stop Runtime Effective-Date Usage
+
+Repo: zemtu
+Workdir: .
+
+## Branch Instructions
+- Source branch: \`dev\`
+- Create branch: \`feature/payment-toolbox/2003-stop-runtime-effective-date-usage\`
+
+## Goal
+First spec.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(specsRoot, "2004-coverage_guard-define-coverage-decision-record.md"),
+    `# 2004 - coverage_guard: Define CoverageDecisionRecord
+
+Repo: zemtu
+Workdir: .
+
+## Branch Instructions
+- Source branch: \`feature/payment-toolbox/2003-stop-runtime-effective-date-usage\`
+- Create branch: \`feature/payment-toolbox/2004-define-coverage-decision-record\`
+
+## Goal
+Second spec.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+  await execFile("git", ["add", "."], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "add specs"], { cwd: repoRoot });
+  const { stdout: devCommit } = await execFile("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+  await execFile("git", ["update-ref", "refs/remotes/origin/dev", devCommit.trim()], { cwd: repoRoot });
+  await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/dev"], { cwd: repoRoot });
+  await execFile("git", ["checkout", "-b", "feature/missing-spec-root"], { cwd: repoRoot });
+  await fs.rm(path.join(repoRoot, "docs"), { recursive: true, force: true });
+  await execFile("git", ["add", "-A"], { cwd: repoRoot });
+  await execFile("git", ["commit", "-m", "remove specs from branch"], { cwd: repoRoot });
+
+  return { workspaceRoot, projectRoot, repoRoot };
+}
+
 test("parseArgs keeps the first positional token as a run filter when the subcommand is omitted", () => {
   const parsed = parseArgs(["1001-demo", "--dry-run", "--max-iterations", "5"]);
 
@@ -816,6 +886,56 @@ git status --short
   assert.deepEqual(executedSpecIds, [
     "2003-stop-runtime-effective-date-usage",
     "2004-coverage_guard-define-coverage-decision-record",
+  ]);
+});
+
+test("runCommand falls back to origin/HEAD once and warns once when the live spec root is missing", async () => {
+  const { projectRoot } = await createCliGitFallbackFixture();
+  const previousCwd = process.cwd();
+  const executedSpecIds: string[] = [];
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+
+  console.warn = (message?: unknown) => {
+    warnings.push(String(message));
+  };
+  process.chdir(projectRoot);
+  try {
+    const exitCode = await runCommand(
+      parseArgs([
+        "run",
+        "--workspace-root",
+        "../zemtu",
+        "--spec-root",
+        "../zemtu/docs/specs/payment-toolbox",
+        "--checkout-mode",
+        "root",
+        "--dry-run",
+      ]),
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          executedSpecIds.push(spec.specId);
+          return {
+            status: "needs_more_work",
+            summary: "Dry run prepared checkout.",
+            candidateCommit: undefined,
+            nextAction: "re-run",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+    console.warn = originalWarn;
+  }
+
+  assert.deepEqual(executedSpecIds, [
+    "2003-stop-runtime-effective-date-usage",
+    "2004-coverage_guard-define-coverage-decision-record",
+  ]);
+  assert.deepEqual(warnings, [
+    `Spec root ${path.join(projectRoot, "../zemtu/docs/specs/payment-toolbox")} is missing on the current checkout; reading specs from origin/dev instead.`,
   ]);
 });
 

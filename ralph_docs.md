@@ -543,6 +543,7 @@ The workflow file is:
 - `--to <spec>` is the built-in bounded batch operator flow for sequential backlog execution.
 - `--workspace-root <path>` accepts either an absolute path or a path relative to the Ralph project root.
 - `--spec-root <path>` accepts either an absolute path or a path relative to the Ralph project root. Positional spec paths remain relative to that selected spec root.
+- If a custom spec root lives inside the target repo and is missing on the current checkout, Ralph falls back to reading specs from `origin/HEAD` and emits a one-time warning with the fallback ref.
 - `--dry-run` is intentionally non-persistent: no `.ralph/` writes happen during dry-run.
 - The current review loop is capped by `--max-iterations` (default: `5`).
 - Success is determined by structured agent outputs and the recheck verdict, not by heuristics on plain terminal output.

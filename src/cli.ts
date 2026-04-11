@@ -278,6 +278,14 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
   if (!(parsed.command === "run" && parsed.dryRun)) {
     await ensureRuntimePaths(paths);
   }
+  const emittedWarnings = new Set<string>();
+  const warnSpecRead = (message: string): void => {
+    if (emittedWarnings.has(message)) {
+      return;
+    }
+    emittedWarnings.add(message);
+    console.warn(message);
+  };
 
   if (parsed.command === "status") {
     const states = await listRunStates(paths);
@@ -298,7 +306,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       console.error("inspect requires a spec path like 1001-example.md");
       return 1;
     }
-    const spec = await parseSpecFile(projectRoot, workspaceRoot, parsed.inspectTarget, paths.specRoot);
+    const spec = await parseSpecFile(projectRoot, workspaceRoot, parsed.inspectTarget, paths.specRoot, { onWarning: warnSpecRead });
     console.log(JSON.stringify(spec, null, 2));
     return 0;
   }
@@ -318,7 +326,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       console.error("mark-done requires a spec path or id like 1001-example.md");
       return 1;
     }
-    const specPaths = await discoverSpecPaths(paths.specRoot);
+    const specPaths = await discoverSpecPaths(paths.specRoot, { onWarning: warnSpecRead });
     const matchingTargets = specPaths.filter((specPath) => specPath.includes(parsed.markDoneTarget as string));
     if (matchingTargets.length === 0) {
       console.error(`No specs matched ${parsed.markDoneTarget}.`);
@@ -328,13 +336,13 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       console.error(`${parsed.markDoneTarget} is ambiguous: ${matchingTargets.join(", ")}`);
       return 1;
     }
-    const spec = await parseSpecFile(projectRoot, workspaceRoot, matchingTargets[0]!, paths.specRoot);
+    const spec = await parseSpecFile(projectRoot, workspaceRoot, matchingTargets[0]!, paths.specRoot, { onWarning: warnSpecRead });
     await markSpecDone(paths, spec, "Manually marked done outside Ralph.");
     console.log(`Marked ${spec.specId} as done.`);
     return 0;
   }
 
-  const specPaths = await discoverSpecPaths(paths.specRoot);
+  const specPaths = await discoverSpecPaths(paths.specRoot, { onWarning: warnSpecRead });
   const filtered = parsed.specFilters.length > 0
     ? specPaths.filter((specPath) => parsed.specFilters.some((filter) => specPath.includes(filter)))
     : specPaths;
@@ -418,7 +426,7 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       : `Running ${selected.length} spec(s) with smart role policy maxIterations=${parsed.maxIterations}${parsed.resume ? " resume=true" : ""}`,
   );
   const selectedSpecs = await Promise.all(
-    selected.map((relSpec) => parseSpecFile(projectRoot, workspaceRoot, relSpec, paths.specRoot)),
+    selected.map((relSpec) => parseSpecFile(projectRoot, workspaceRoot, relSpec, paths.specRoot, { onWarning: warnSpecRead })),
   );
   for (const [index, spec] of selectedSpecs.entries()) {
     const specIndex = index + 1;
