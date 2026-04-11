@@ -417,8 +417,10 @@ export async function runCommand(parsed: ParsedArgs, deps: CommandDependencies =
       ? `Running ${selected.length} spec(s) with model override=${parsed.model} maxIterations=${parsed.maxIterations}${parsed.resume ? " resume=true" : ""}`
       : `Running ${selected.length} spec(s) with smart role policy maxIterations=${parsed.maxIterations}${parsed.resume ? " resume=true" : ""}`,
   );
-  for (const [index, relSpec] of selected.entries()) {
-    const spec = await parseSpecFile(projectRoot, workspaceRoot, relSpec, paths.specRoot);
+  const selectedSpecs = await Promise.all(
+    selected.map((relSpec) => parseSpecFile(projectRoot, workspaceRoot, relSpec, paths.specRoot)),
+  );
+  for (const [index, spec] of selectedSpecs.entries()) {
     const specIndex = index + 1;
     console.log(`\n[${specIndex}/${selected.length}] ${spec.specId} :: ${spec.title}`);
     let printedLogPath = false;

@@ -334,6 +334,7 @@ That gives every spec run its own local Codex hook/config bundle.
 
 - reuses the repository root itself as the active checkout
 - supports the same spec-selection shapes as ordinary runs, including `--to`
+- snapshots the selected specs before branch switching so later spec reads stay stable even when the spec root lives inside the target repo
 - requires a clean repository and refuses detached HEAD
 - checks out or creates each spec feature branch directly in the repo root
 - leaves the repo on the last processed branch after setup and after the run

@@ -727,6 +727,98 @@ git status --short
   assert.equal(seenWorkspaceRoot, expectedWorkspaceRoot);
 });
 
+test("runCommand snapshots selected specs before executing a root-checkout batch", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-root-batch-spec-snapshot-"));
+  const projectRoot = path.join(workspaceRoot, "ralph");
+  const repoRoot = path.join(workspaceRoot, "zemtu");
+  const specRoot = path.join(repoRoot, "docs", "specs", "payment-toolbox");
+  const previousCwd = process.cwd();
+  const executedSpecIds: string[] = [];
+
+  await scaffoldProjectRoot(projectRoot);
+  await fs.mkdir(specRoot, { recursive: true });
+  await fs.mkdir(path.join(repoRoot, ".git"), { recursive: true });
+  await fs.writeFile(
+    path.join(specRoot, "2003-stop-runtime-effective-date-usage.md"),
+    `# 2003 - Stop Runtime Effective-Date Usage
+
+Repo: zemtu
+Workdir: .
+
+## Branch Instructions
+- Source branch: \`main\`
+- Create branch: \`feature/payment-toolbox/2003-stop-runtime-effective-date-usage\`
+
+## Goal
+First root-batch spec.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(specRoot, "2004-coverage_guard-define-coverage-decision-record.md"),
+    `# 2004 - coverage_guard: Define CoverageDecisionRecord
+
+Repo: zemtu
+Workdir: .
+
+## Branch Instructions
+- Source branch: \`feature/payment-toolbox/2003-stop-runtime-effective-date-usage\`
+- Create branch: \`feature/payment-toolbox/2004-define-coverage-decision-record\`
+
+## Goal
+Second root-batch spec.
+
+## Verification (Fast-First)
+\`\`\`bash
+git status --short
+\`\`\`
+`,
+    "utf8",
+  );
+
+  process.chdir(projectRoot);
+  try {
+    const exitCode = await runCommand(
+      parseArgs([
+        "run",
+        "--workspace-root",
+        "../zemtu",
+        "--spec-root",
+        "../zemtu/docs/specs/payment-toolbox",
+        "--checkout-mode",
+        "root",
+      ]),
+      {
+        executeSpec: async (_paths, _options, spec) => {
+          executedSpecIds.push(spec.specId);
+          if (spec.specId === "2003-stop-runtime-effective-date-usage") {
+            await fs.rm(path.join(specRoot, "2004-coverage_guard-define-coverage-decision-record.md"));
+          }
+          return {
+            status: "needs_more_work",
+            summary: "Prepared root checkout batch item.",
+            candidateCommit: undefined,
+            nextAction: "re-run",
+          };
+        },
+      },
+    );
+    assert.equal(exitCode, 0);
+  } finally {
+    process.chdir(previousCwd);
+  }
+
+  assert.deepEqual(executedSpecIds, [
+    "2003-stop-runtime-effective-date-usage",
+    "2004-coverage_guard-define-coverage-decision-record",
+  ]);
+});
+
 test("runCommand discovers specs from a custom spec root", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ralph-cli-custom-discovery-"));
   const projectRoot = path.join(workspaceRoot, "ralph");
