@@ -12,7 +12,7 @@ Documentation rule:
 
 For each spec, Ralph runs a fixed role pipeline:
 
-1. `planning_spec`, `planning_repo`, and `planning_risks` build separate read-only views of the spec, repository, and likely failure surface.
+1. `planning_spec`, `planning_repo`, and `planning_risks` build separate read-only views of the spec, repository, and likely failure surface. Ralph derives the helper lens from the role itself so a mislabeled helper payload does not abort planning.
 2. `supervisor` synthesizes those views into a strategy and optional extra review coverage.
 3. `understander` turns that strategy into the concrete execution packet.
 4. `implementer` makes the change in the active checkout and commits it. That checkout is an isolated worktree by default, or the repo root when `--checkout-mode root` is used. Ralph then validates the candidate against the full branch diff from `merge-base..HEAD`, not just the last commit.

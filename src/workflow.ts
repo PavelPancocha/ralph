@@ -67,8 +67,7 @@ const supervisorStrategySchema = z.object({
   notesForUnderstander: z.array(z.string()),
 });
 
-const planningViewSchema = z.object({
-  lens: z.enum(["spec", "repo", "risks"]),
+const planningViewPayloadSchema = z.object({
   summary: z.string(),
   keyPoints: z.array(z.string()),
   suggestedFiles: z.array(z.string()),
@@ -175,12 +174,13 @@ const supervisorStrategyOutputSchema: StructuredOutputSchema<SupervisorStrategy>
   },
 };
 
-const planningViewOutputSchema: StructuredOutputSchema<PlanningView> = {
-  zod: planningViewSchema,
+type PlanningViewPayload = z.infer<typeof planningViewPayloadSchema>;
+
+const planningViewPayloadOutputSchema: StructuredOutputSchema<PlanningViewPayload> = {
+  zod: planningViewPayloadSchema,
   json: {
     type: "object",
     properties: {
-      lens: { type: "string", enum: ["spec", "repo", "risks"] },
       summary: { type: "string" },
       keyPoints: { type: "array", items: { type: "string" } },
       suggestedFiles: { type: "array", items: { type: "string" } },
@@ -190,7 +190,7 @@ const planningViewOutputSchema: StructuredOutputSchema<PlanningView> = {
       },
       verificationHints: { type: "array", items: { type: "string" } },
     },
-    required: ["lens", "summary", "keyPoints", "suggestedFiles", "suggestedReviewers", "verificationHints"],
+    required: ["summary", "keyPoints", "suggestedFiles", "suggestedReviewers", "verificationHints"],
     additionalProperties: false,
   },
 };
@@ -349,6 +349,45 @@ function planningHelperLens(role: typeof planningHelperRoles[number]): PlanningL
     case "planning_risks":
       return "risks";
   }
+}
+
+function materializePlanningView(lens: PlanningLens, payload: PlanningViewPayload): PlanningView {
+  return {
+    lens,
+    ...payload,
+  };
+}
+
+function normalizePlanningArtifact(
+  role: typeof planningHelperRoles[number],
+  artifact: AgentRunArtifact<PlanningView> | null,
+): AgentRunArtifact<PlanningView> | null {
+  if (!artifact) {
+    return null;
+  }
+  const payload = planningViewPayloadSchema.parse(artifact.output);
+  return {
+    ...artifact,
+    output: materializePlanningView(planningHelperLens(role), payload),
+  };
+}
+
+async function normalizeAndPersistPlanningArtifact(
+  paths: RuntimePaths,
+  specId: string,
+  runId: string,
+  iteration: number,
+  role: typeof planningHelperRoles[number],
+  artifact: AgentRunArtifact<PlanningView> | null,
+): Promise<AgentRunArtifact<PlanningView> | null> {
+  const normalized = normalizePlanningArtifact(role, artifact);
+  if (!normalized) {
+    return null;
+  }
+  if (JSON.stringify(artifact?.output) !== JSON.stringify(normalized.output)) {
+    await overwriteArtifact(paths, specId, runId, `${role}-${iteration}`, normalized);
+  }
+  return normalized;
 }
 
 function planningHelperOptions(
@@ -653,6 +692,35 @@ async function runStructuredTurn<T>(
   return artifact;
 }
 
+async function runPlanningHelperTurn(
+  codex: CodexLike,
+  paths: RuntimePaths,
+  spec: SpecDocument,
+  state: RunState,
+  runId: string,
+  helperRole: typeof planningHelperRoles[number],
+  options: RoleExecutionOptions,
+  prompt: string,
+): Promise<AgentRunArtifact<PlanningView>> {
+  const payloadArtifact = await runStructuredTurn(
+    codex,
+    paths,
+    spec,
+    state,
+    runId,
+    options,
+    planningViewPayloadOutputSchema,
+    prompt,
+  );
+  const artifact: AgentRunArtifact<PlanningView> = {
+    ...payloadArtifact,
+    output: materializePlanningView(planningHelperLens(helperRole), payloadArtifact.output),
+  };
+  const artifactIteration = state.currentIteration > 0 ? state.currentIteration : "setup";
+  await overwriteArtifact(paths, spec.specId, runId, `${helperRole}-${artifactIteration}`, artifact);
+  return artifact;
+}
+
 function implementationPromptFixes(findings: ReviewFinding[]): string[] {
   return findings.map((finding) => `${finding.category}: ${finding.action}`);
 }
@@ -667,6 +735,18 @@ async function writeHumanArtifact(
   const dir = path.join(paths.artifactsRoot, specId, runId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, filename), content, "utf8");
+}
+
+async function overwriteArtifact(
+  paths: RuntimePaths,
+  specId: string,
+  runId: string,
+  name: string,
+  payload: unknown,
+): Promise<void> {
+  const dir = path.join(paths.artifactsRoot, specId, runId);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, `${name}.json`), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
 async function emitProgress(
@@ -752,9 +832,16 @@ async function loadPlanningCheckpointArtifacts(
     loadAgentArtifact<PlanningView>(paths, specId, runId, `planning_risks-${seedIteration}`),
     loadAgentArtifact<SupervisorStrategy>(paths, specId, runId, `supervisor-${seedIteration}`),
   ]);
-  const planningArtifacts = [planningSpec, planningRepo, planningRisks];
-  const planningViews = planningArtifacts.every((artifact) => artifact !== null)
-    ? planningArtifacts.map((artifact) => artifact.output)
+  const planningArtifacts = await Promise.all([
+    normalizeAndPersistPlanningArtifact(paths, specId, runId, seedIteration, "planning_spec", planningSpec),
+    normalizeAndPersistPlanningArtifact(paths, specId, runId, seedIteration, "planning_repo", planningRepo),
+    normalizeAndPersistPlanningArtifact(paths, specId, runId, seedIteration, "planning_risks", planningRisks),
+  ]);
+  const normalizedPlanningArtifacts = planningArtifacts.filter(
+    (artifact): artifact is AgentRunArtifact<PlanningView> => artifact !== null,
+  );
+  const planningViews = normalizedPlanningArtifacts.length === planningArtifacts.length
+    ? normalizedPlanningArtifacts.map((artifact) => artifact.output)
     : undefined;
   return {
     ...(planningViews ? { planningViews } : {}),
@@ -1315,21 +1402,16 @@ export async function executeSpec(
         iteration: state.currentIteration,
         summary: `running ${helperRole} helper`,
       });
-      const planningView = await runStructuredTurn(
+      const planningView = await runPlanningHelperTurn(
         codex,
         paths,
         spec,
         state,
         runId,
+        helperRole,
         planningHelperOptions(helperRole, options.model, worktreePath, additionalDirectories, escalated, checkoutMode),
-        planningViewOutputSchema,
         buildPlanningHelperPrompt(spec, worktreePath, planningHelperLens(helperRole), invalidationReason),
       );
-      if (planningView.output.lens !== planningHelperLens(helperRole)) {
-        throw new Error(
-          `Planning helper output mismatch for spec ${spec.specId}: expected ${planningHelperLens(helperRole)}, got ${planningView.output.lens}`,
-        );
-      }
       planningViews.push(planningView.output);
     }
 

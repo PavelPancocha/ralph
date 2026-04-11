@@ -77,6 +77,7 @@ async function createCliGitFallbackFixture(): Promise<{
   await execFile("git", ["init", "-b", "dev"], { cwd: repoRoot });
   await execFile("git", ["config", "user.email", "ralph@example.com"], { cwd: repoRoot });
   await execFile("git", ["config", "user.name", "Ralph Test"], { cwd: repoRoot });
+  await execFile("git", ["config", "commit.gpgsign", "false"], { cwd: repoRoot });
   await fs.writeFile(
     path.join(specsRoot, "2003-stop-runtime-effective-date-usage.md"),
     `# 2003 - Stop Runtime Effective-Date Usage

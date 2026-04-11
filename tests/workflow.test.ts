@@ -1316,7 +1316,7 @@ test("executeSpec reuses restored planning context after resumed implementation 
     role: "planning_repo",
     turnId: "planning_repo:saved-run",
     threadId: "saved-planning-repo",
-    output: JSON.parse(planningViewResponse("repo", "Saved repo view.", {
+    output: JSON.parse(planningViewResponse("spec", "Saved repo view.", {
       suggestedFiles: [path.join(repoRoot, "README.md")],
     })),
     usage: null,
@@ -1489,6 +1489,21 @@ test("executeSpec reuses restored planning context after resumed implementation 
     fakeCodex.prompts.filter((entry) => entry.prompt.includes("You are the understander agent for Ralph.")).length,
     1,
   );
+  assert.ok(
+    fakeCodex.prompts.some(
+      (entry) =>
+        entry.prompt.includes("You are the understander agent for Ralph.")
+        && entry.prompt.includes("- repo: Saved repo view."),
+    ),
+  );
+  const normalizedPlanningRepoArtifact = await readJsonFile<{
+    output: {
+      lens: string;
+      summary: string;
+    };
+  }>(path.join(paths.artifactsRoot, spec.specId, savedRunId, "planning_repo-1.json"));
+  assert.equal(normalizedPlanningRepoArtifact.output.lens, "repo");
+  assert.equal(normalizedPlanningRepoArtifact.output.summary, "Saved repo view.");
 });
 
 test("executeSpec always includes correctness and tests reviewers when the supervisor adds extra coverage", async () => {
@@ -2650,6 +2665,97 @@ test("executeSpec normalizes legacy run state and starts fresh threads when poli
   assert.equal(state.stateVersion, 2);
   assert.equal(state.threads.planningSpec, "thread-0");
   assert.ok(state.threadPolicies.planningSpec);
+});
+
+test("executeSpec derives the planning helper lens from the helper role", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
+  const commitHash = "fedcbafedcbafedcbafedcbafedcbafedcbafedc";
+
+  const fakeCodex = new FakeCodex([
+    planningViewResponse("spec", "Spec view is aligned.", {
+      keyPoints: ["Keep the change scoped to the spec contract."],
+    }),
+    planningViewResponse("spec", "Repo view identifies the likely files.", {
+      suggestedFiles: [path.join(repoRoot, "README.md"), path.join(expectedWorktreePath, "README.md")],
+    }),
+    planningViewResponse("risks", "Risk view confirms correctness/tests coverage.", {
+      suggestedReviewers: ["correctness", "tests"],
+      verificationHints: ["Prefer git status --short first."],
+    }),
+    JSON.stringify({
+      summary: "Use standard correctness and tests reviewers.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Single pass.",
+      repoPath: repoRoot,
+      worktreePath: expectedWorktreePath,
+      checkoutMode: "worktree",
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Update README.md", "Run git status --short"],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Committed one attempt.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Verified locally.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification coverage is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    { workspaceRoot, projectRoot, model: undefined, maxIterations: 1, dryRun: false, specFilters: [] },
+    spec,
+    fakeWorkflowDeps(fakeCodex),
+  );
+
+  assert.equal(outcome.status, "done");
+  const state = await readJsonFile<RunState>(path.join(paths.stateRoot, `${spec.specId}.json`));
+  const planningRepoArtifact = await readJsonFile<{
+    output: {
+      lens: string;
+      summary: string;
+    };
+  }>(path.join(paths.artifactsRoot, spec.specId, state.runId as string, "planning_repo-1.json"));
+  assert.equal(planningRepoArtifact.output.lens, "repo");
+  assert.equal(planningRepoArtifact.output.summary, "Repo view identifies the likely files.");
 });
 
 test("executeSpec resumes a persisted thread when the saved policy matches", async () => {

@@ -300,6 +300,7 @@ Ralph v2 does not rely on magic phrases or stdout parsing for correctness. Inste
 Important payloads:
 
 - `PlanningView`
+  Ralph derives `PlanningView.lens` from the planning-helper role (`planning_spec`, `planning_repo`, `planning_risks`) and treats the model response as the body only.
 - `SupervisorStrategy`
 - `UnderstandingPacket`
 - `ImplementationReport`
