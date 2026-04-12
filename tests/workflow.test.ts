@@ -351,6 +351,143 @@ async function writeArtifactJson(
   await fs.writeFile(path.join(dir, `${name}.json`), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+async function writeSessionJsonl(
+  paths: RuntimePaths,
+  fileName: string,
+  lines: unknown[],
+): Promise<string> {
+  const absolute = path.join(paths.ralphRoot, "codex-home", "sessions", "2026", "04", "10", fileName);
+  await fs.mkdir(path.dirname(absolute), { recursive: true });
+  await fs.writeFile(absolute, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
+  return absolute;
+}
+
+async function seedDirtyRootImplementingState(
+  paths: RuntimePaths,
+  spec: { specId: string; relFromSpecs: string },
+  repoRoot: string,
+  runId: string,
+  options: {
+    targetFiles: string[];
+    branch?: string;
+    commandOutput?: string;
+  },
+): Promise<void> {
+  const branch = options.branch ?? "feature/demo";
+  const commandOutput = options.commandOutput
+    ?? [
+      `Command: /bin/bash -lc 'git status --short --branch'`,
+      "Output:",
+      `## ${branch}`,
+      ...options.targetFiles.map((file) => `M  ${file}`),
+      "",
+    ].join("\n");
+
+  await fs.writeFile(
+    path.join(paths.stateRoot, `${spec.specId}.json`),
+    `${JSON.stringify({
+      stateVersion: 2,
+      specId: spec.specId,
+      specRel: spec.relFromSpecs,
+      status: "implementing",
+      currentIteration: 1,
+      runId,
+      checkoutMode: "root",
+      worktreePath: repoRoot,
+      updatedAt: new Date("2026-04-10T09:00:00.000Z").toISOString(),
+      threads: {},
+      threadPolicies: {},
+      legacyDoneDetected: false,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  await writeArtifactJson(paths, spec.specId, runId, "understander-1", {
+    role: "understander",
+    turnId: `understander:${runId}`,
+    threadId: "saved-understander",
+    output: {
+      summary: "Resume from the audited dirty root checkout.",
+      repoPath: repoRoot,
+      worktreePath: repoRoot,
+      checkoutMode: "root",
+      featureBranch: branch,
+      targetFiles: options.targetFiles,
+      contextFiles: ["README.md"],
+      executionPlan: ["Continue from the existing dirty checkout state."],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    },
+    usage: null,
+    items: [],
+    rawResponse: "{}",
+  });
+
+  const eventLogPath = runEventLogPath(paths, spec.specId, runId);
+  await fs.mkdir(path.dirname(eventLogPath), { recursive: true });
+  await fs.writeFile(
+    eventLogPath,
+    [
+      `2026-04-10T09:00:00.000Z phase=setup checkout ready at ${repoRoot}`,
+      "2026-04-10T09:00:01.000Z phase=planning iteration=1 building understanding packet",
+      "2026-04-10T09:00:02.000Z phase=implementing iteration=1 running implementer",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  await writeSessionJsonl(
+    paths,
+    `rollout-2026-04-10T09-00-02-${runId}.jsonl`,
+    [
+      {
+        timestamp: "2026-04-10T09:00:02.000Z",
+        type: "session_meta",
+        payload: {
+          id: `${runId}-session`,
+          cwd: repoRoot,
+        },
+      },
+      {
+        timestamp: "2026-04-10T09:00:03.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: [
+                "You are the implementer agent for Ralph.",
+                `Required feature branch: ${branch}`,
+              ].join("\n"),
+            },
+          ],
+        },
+      },
+      {
+        timestamp: "2026-04-10T09:00:04.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "call_status",
+          output: commandOutput,
+        },
+      },
+      {
+        timestamp: "2026-04-10T09:00:05.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "call_commit",
+          output: "Command: /bin/bash -lc 'git commit -m \"feature/demo\"'\nOutput:\n",
+        },
+      },
+    ],
+  );
+}
+
 test("executeSpec dry-run warns when a stacked parent branch is expected from an earlier spec", async () => {
   const { projectRoot, workspaceRoot, paths } = await createTempProject();
   await writeWorkflowSpec(projectRoot, "1002-stacked-child.md", {
@@ -913,6 +1050,394 @@ test("executeSpec root checkout mode resumes from a dirty feature-branch checkou
   const { stdout: branchName } = await execFile("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
   assert.equal(branchName.trim(), "feature/demo");
   assert.equal(await fs.readFile(path.join(repoRoot, "DIRTY.txt"), "utf8"), "in progress\n");
+});
+
+test("executeSpec root checkout mode auto-recovers a dirty implementing checkout on ordinary rerun when audit matches", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const commitHash = "cccccccccccccccccccccccccccccccccccccccc";
+  const savedRunId = "root-recovery-run";
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  await execFile("git", ["checkout", "-b", "feature/demo"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# recovered change\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: repoRoot });
+  await seedDirtyRootImplementingState(paths, spec, repoRoot, savedRunId, {
+    targetFiles: ["README.md"],
+  });
+
+  const fakeCodex = new FakeCodex([
+    JSON.stringify({
+      summary: "Recovered the staged change and committed it.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Recovered root-mode implementation.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Recovery verification is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse("Recovery review is ready."),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Recovered implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully after recovery.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: false,
+      specFilters: [],
+      checkoutMode: "root",
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+      validateImplementationCandidate: async () => null,
+      runVerificationCommands: async () => ({
+        repoPath: repoRoot,
+        featureBranch: "feature/demo",
+        startingBranch: "feature/demo",
+        startingCommit: commitHash,
+        restoredBranch: "feature/demo",
+        commands: [
+          {
+            command: "git status --short",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          },
+        ],
+        summary: "Stubbed recovery verification.",
+        succeeded: true,
+      }),
+    }),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.equal(fakeCodex.prompts[0]?.prompt.includes("You are Ralph's planning helper"), false);
+  assert.ok(fakeCodex.prompts[0]?.prompt.includes("Recovery audit summary:"));
+  assert.ok(fakeCodex.prompts[0]?.prompt.includes("Inspect the existing dirty changes first"));
+  assert.deepEqual(
+    progressEvents
+      .filter((event) => event.phase === "recovery")
+      .map((event) => event.summary),
+    ["dirty root checkout audit passed; continuing from recovered same-spec state"],
+  );
+});
+
+test("executeSpec root checkout mode stashes an audit-failed dirty implementing checkout and restarts clean", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const commitHash = "dddddddddddddddddddddddddddddddddddddddd";
+  const savedRunId = "root-recovery-fail-run";
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  await execFile("git", ["checkout", "-b", "feature/demo"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# mismatched change\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "EXTRA.txt"), "unexpected\n", "utf8");
+  await seedDirtyRootImplementingState(paths, spec, repoRoot, savedRunId, {
+    targetFiles: ["README.md"],
+  });
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, repoRoot),
+    JSON.stringify({
+      summary: "Replanned after stashing the mismatched dirty checkout.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Build a fresh clean candidate.",
+      repoPath: repoRoot,
+      worktreePath: repoRoot,
+      checkoutMode: "root",
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Recreate the change from a clean checkout."],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Implemented the clean rerun and committed it.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Fresh rerun implementation.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Fresh rerun implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully after stashing the mismatched checkout.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: false,
+      specFilters: [],
+      checkoutMode: "root",
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+      validateImplementationCandidate: async () => null,
+      runVerificationCommands: async () => ({
+        repoPath: repoRoot,
+        featureBranch: "feature/demo",
+        startingBranch: "feature/demo",
+        startingCommit: commitHash,
+        restoredBranch: "feature/demo",
+        commands: [
+          {
+            command: "git status --short",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          },
+        ],
+        summary: "Stubbed verification after stash.",
+        succeeded: true,
+      }),
+    }),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.ok(fakeCodex.prompts[0]?.prompt.includes("You are Ralph's planning helper for the spec lens."));
+  assert.deepEqual(
+    progressEvents
+      .filter((event) => event.phase === "recovery")
+      .map((event) => event.summary),
+    ["dirty root checkout audit failed; stashed changes and restarting from a clean checkout"],
+  );
+  const { stdout: stashList } = await execFile("git", ["-C", repoRoot, "stash", "list"]);
+  assert.match(stashList, /ralph root recovery 1001-demo root-recovery-fail-run/);
+  const { stdout: finalStatus } = await execFile("git", ["-C", repoRoot, "status", "--short"]);
+  assert.equal(finalStatus.trim(), "");
+});
+
+test("executeSpec root checkout mode preserves the existing clean-tree failure when dirty work cannot be linked to the same branch", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  await execFile("git", ["checkout", "-b", "feature/other"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# unrelated dirty work\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: repoRoot });
+  await seedDirtyRootImplementingState(paths, spec, repoRoot, "root-recovery-unlinked-run", {
+    targetFiles: ["README.md"],
+    branch: "feature/demo",
+  });
+
+  await assert.rejects(
+    executeSpec(
+      paths,
+      {
+        workspaceRoot,
+        projectRoot,
+        model: undefined,
+        maxIterations: 2,
+        dryRun: false,
+        specFilters: [],
+        checkoutMode: "root",
+      },
+      spec,
+      fakeWorkflowDeps(new FakeCodex([]), {
+        onProgress: (event) => {
+          progressEvents.push(event);
+        },
+      }),
+    ),
+    /Root checkout mode requires a clean repository/,
+  );
+
+  assert.deepEqual(progressEvents.filter((event) => event.phase === "recovery"), []);
+  const { stdout: stashList } = await execFile("git", ["-C", repoRoot, "stash", "list"]);
+  assert.doesNotMatch(stashList, /ralph root recovery 1001-demo/);
+});
+
+test("executeSpec root checkout mode stashes and restarts when matching session evidence is missing", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const commitHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  await execFile("git", ["checkout", "-b", "feature/demo"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# dirty but unproven\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: repoRoot });
+  await seedDirtyRootImplementingState(paths, spec, repoRoot, "root-recovery-missing-session", {
+    targetFiles: ["README.md"],
+    commandOutput: [
+      "Command: /bin/bash -lc 'git status --short --branch'",
+      "Output:",
+      "## feature/demo",
+      "M  DIFFERENT.md",
+      "",
+    ].join("\n"),
+  });
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, repoRoot),
+    JSON.stringify({
+      summary: "Replanned after the missing session evidence forced a fresh start.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Rebuild from a clean checkout.",
+      repoPath: repoRoot,
+      worktreePath: repoRoot,
+      checkoutMode: "root",
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Recreate the change after stashing the unverifiable dirty checkout."],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Implemented the restarted clean candidate.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Fresh rerun after missing session evidence.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Fresh rerun implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully after restarting from missing session evidence.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: false,
+      specFilters: [],
+      checkoutMode: "root",
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+      validateImplementationCandidate: async () => null,
+      runVerificationCommands: async () => ({
+        repoPath: repoRoot,
+        featureBranch: "feature/demo",
+        startingBranch: "feature/demo",
+        startingCommit: commitHash,
+        restoredBranch: "feature/demo",
+        commands: [
+          {
+            command: "git status --short",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          },
+        ],
+        summary: "Stubbed verification after missing-session restart.",
+        succeeded: true,
+      }),
+    }),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.deepEqual(
+    progressEvents
+      .filter((event) => event.phase === "recovery")
+      .map((event) => event.summary),
+    ["dirty root checkout audit failed; stashed changes and restarting from a clean checkout"],
+  );
+  const { stdout: stashList } = await execFile("git", ["-C", repoRoot, "stash", "list"]);
+  assert.match(stashList, /ralph root recovery 1001-demo root-recovery-missing-session/);
 });
 
 test("executeSpec normalizes implementer changedFiles to branch-wide diff before validation", async () => {

@@ -1,4 +1,5 @@
 import type {
+  ImplementerRecoveryContext,
   ImplementationReport,
   PlanningLens,
   PlanningView,
@@ -221,11 +222,32 @@ export function buildImplementerPrompt(
   worktreePath: string,
   priorFixInstructions: string[],
   escalated: boolean,
+  recoveryContext?: ImplementerRecoveryContext,
 ): string {
   const fixBlock =
     priorFixInstructions.length > 0
       ? ["", "Outstanding fixes to address first:", ...priorFixInstructions.map((item) => `- ${item}`)].join("\n")
       : "";
+  const recoveryBlock = recoveryContext
+    ? [
+        "",
+        "Recovery audit summary:",
+        recoveryContext.auditSummary,
+        "",
+        `Recovered expected-file source: ${recoveryContext.expectedFilesSource}`,
+        "Recovered dirty files:",
+        ...recoveryContext.dirtyFiles.map((item) => `- ${item}`),
+        ...(recoveryContext.sessionEvidence
+          ? [
+              "",
+              `Saved implementer session evidence: ${recoveryContext.sessionEvidence.sessionPath}`,
+              ...recoveryContext.sessionEvidence.matchedSignals.map((item) => `- ${item}`),
+            ]
+          : []),
+        "",
+        "Inspect the existing dirty changes first. Reuse them if they are correct, make only the minimal corrections needed, then commit and report normally.",
+      ].join("\n")
+    : "";
 
   return [
     "You are the implementer agent for Ralph.",
@@ -241,6 +263,7 @@ export function buildImplementerPrompt(
     "",
     `Active checkout: ${worktreePath}`,
     `Required feature branch: ${spec.branchInstructions.createBranch}`,
+    recoveryBlock,
     "",
     renderSpec(spec),
     "",

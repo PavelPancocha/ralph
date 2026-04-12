@@ -62,6 +62,8 @@ Before execution, Ralph skips any specs that are already done and logs them expl
 
 If `--resume` is used, Ralph skips ahead to the latest feasible checkpoint it can reconstruct from the saved run state and artifacts. It prefers the furthest completed stage, restores saved planning context when it is available, and then continues from there instead of replaying earlier completed work. Ralph only advances the durable checkpoint pointer after it has written a new structured artifact, so an early setup failure does not make the previous resumable run disappear. The CLI prints a checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or fell back to a fresh run.
 
+In `--checkout-mode root`, Ralph also runs a recovery audit on ordinary reruns when the repo root is dirty. If the dirty tree can be linked to the same interrupted spec and exactly matches the saved implementation evidence, Ralph emits a `recovery` progress event and re-enters the implementer stage with recovery context instead of failing the setup preflight. If the dirty tree is linked to the same interrupted spec but fails the audit, Ralph writes recovery audit/stash artifacts, stashes the dirty checkout with `git stash push -u`, and restarts from a clean checkout. If the dirty tree cannot be linked to the same spec, Ralph preserves the existing fail-fast behavior and does not stash unrelated work.
+
 ## Default Model Policy
 
 Without `--model`, Ralph uses a role-aware default policy:
@@ -128,6 +130,7 @@ Responsible for:
 - resolving repository paths from workspace-relative spec metadata
 - creating and reusing git worktrees
 - preparing the repo root checkout when `--checkout-mode root` is requested
+- auditing dirty root-checkout reruns and stashing linked mismatches before a fresh restart
 - copying `codex-support/` into the active checkout as `.codex/`
 - publishing approved branches and pull requests
 
@@ -155,6 +158,7 @@ It:
 - persists thread ids in run state
 - writes structured JSON artifacts for each turn
 - emits progress events for terminal streaming and `.ralph/runs/.../events.log`
+- emits `recovery` progress events and persists recovery audit/stash artifacts for root-mode reruns
 - loops review/recheck iterations with role-aware model escalation
 - enters a dedicated `publishing` phase after approval
 - writes the final done report on success
@@ -336,11 +340,13 @@ That gives every spec run its own local Codex hook/config bundle.
 - reuses the repository root itself as the active checkout
 - supports the same spec-selection shapes as ordinary runs, including `--to`
 - snapshots the selected specs before branch switching so later spec reads stay stable even when the spec root lives inside the target repo
-- requires a clean repository and refuses detached HEAD
+- requires a clean repository and refuses detached HEAD, except for same-spec interrupted reruns that pass the root recovery audit
 - checks out or creates each spec feature branch directly in the repo root
 - leaves the repo on the last processed branch after setup and after the run
 - refuses to overwrite an existing user-owned `.codex/` directory in the repo root
 - exposes `/var/run` to implementer and reviewer sandboxes when the spec's verification commands reference Docker
+
+For root-mode recovery Ralph links the dirty checkout to the interrupted spec by checking the current feature branch, saved root-mode run state, saved understanding artifact, and saved `events.log` evidence that the implementer had already started. It then audits the current dirty file set against the saved expected file list, runs `git diff --check` plus `git diff --cached --check`, and, when no implementation artifact exists yet, requires matching implementer session evidence from `codex-home/sessions/`. Passing audits continue automatically. Failing linked audits stash and restart. Unlinked dirty checkouts still fail immediately.
 
 Candidate validation uses the full branch diff from `merge-base..HEAD`, not just the final commit, so multi-commit branches are judged as a branch rather than as one isolated patch commit.
 

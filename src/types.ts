@@ -127,6 +127,7 @@ export interface RunState {
 
 export type WorkflowProgressPhase =
   | "setup"
+  | "recovery"
   | "planning"
   | "implementing"
   | "reviewing"
@@ -219,6 +220,37 @@ export interface VerificationRun {
   commands: VerificationCommandResult[];
   summary: string;
   succeeded: boolean;
+}
+
+export interface RootRecoverySessionEvidence {
+  sessionPath: string;
+  matchedSignals: string[];
+}
+
+export interface RootRecoveryAuditEvidence {
+  expectedFilesSource: "understanding" | "implementation";
+  expectedFiles: string[];
+  dirtyEntries: string[];
+  dirtyFiles: string[];
+  sessionEvidence?: RootRecoverySessionEvidence;
+}
+
+export interface RootRecoveryAudit {
+  linked: boolean;
+  passed: boolean;
+  action: "continue" | "stash_and_restart" | "reject";
+  reasons: string[];
+  priorRunId?: string;
+  expectedBranch: string;
+  currentBranch?: string;
+  evidence?: RootRecoveryAuditEvidence;
+}
+
+export interface ImplementerRecoveryContext {
+  auditSummary: string;
+  dirtyFiles: string[];
+  expectedFilesSource: RootRecoveryAuditEvidence["expectedFilesSource"];
+  sessionEvidence?: RootRecoverySessionEvidence;
 }
 
 export interface PublicationResult {

@@ -1,5 +1,7 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import { z } from "zod";
 import { Codex } from "@openai/codex-sdk";
 
@@ -7,6 +9,7 @@ import type {
   AgentRunArtifact,
   CheckoutMode,
   CodexThreadConfig,
+  ImplementerRecoveryContext,
   ImplementationReport,
   PlanningLens,
   PlanningView,
@@ -15,6 +18,8 @@ import type {
   RecheckVerdict,
   ReviewLeadReport,
   ReviewFinding,
+  RootRecoveryAudit,
+  RootRecoverySessionEvidence,
   ReviewerReport,
   RoleExecutionOptions,
   RunState,
@@ -59,6 +64,8 @@ import {
   validateImplementationCandidate,
 } from "./runtime.js";
 import { discoverSpecPaths, parseSpecFile } from "./specs.js";
+
+const execFileAsync = promisify(execFileCb);
 
 const supervisorStrategySchema = z.object({
   summary: z.string(),
@@ -452,6 +459,7 @@ function implementerOptions(
   additionalDirectories: string[],
   escalated: boolean,
   checkoutMode: CheckoutMode,
+  forceFreshThread = escalated,
 ): RoleExecutionOptions {
   return {
     role: "implementer",
@@ -459,7 +467,7 @@ function implementerOptions(
     workingDirectory: worktreePath,
     additionalDirectories,
     checkoutMode,
-    forceFreshThread: escalated,
+    forceFreshThread,
     sandboxMode: "workspace-write",
     approvalPolicy: "never",
     reasoningEffort: escalated ? "xhigh" : "high",
@@ -956,6 +964,297 @@ async function inferResumeCheckpoint(paths: RuntimePaths, spec: SpecDocument, st
   };
 }
 
+function sortUnique(values: string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function parseGitStatusPath(entry: string): string {
+  const candidate = entry.length > 3 ? entry.slice(3).trim() : entry.trim();
+  const renamedTarget = candidate.match(/^(.*) -> (.*)$/)?.[2];
+  return (renamedTarget ?? candidate).replace(/^"(.*)"$/, "$1");
+}
+
+function statusEntriesToFiles(entries: string[]): string[] {
+  return sortUnique(entries.map((entry) => parseGitStatusPath(entry)));
+}
+
+function extractStatusEntriesFromCommandOutput(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => /^[ MADRCU?!][ MADRCU?!]\s+/.test(line));
+}
+
+function sameFileSet(left: string[], right: string[]): boolean {
+  return JSON.stringify(sortUnique(left)) === JSON.stringify(sortUnique(right));
+}
+
+async function readGitStdout(repoPath: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-C", repoPath, ...args]);
+  return stdout.trim();
+}
+
+async function readGitLines(repoPath: string, args: string[]): Promise<string[]> {
+  const output = await readGitStdout(repoPath, args);
+  return output === "" ? [] : output.split(/\r?\n/);
+}
+
+async function fileExists(absolute: string): Promise<boolean> {
+  try {
+    await fs.access(absolute);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function walkFiles(root: string): Promise<string[]> {
+  if (!(await fileExists(root))) {
+    return [];
+  }
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  const files = await Promise.all(entries.map(async (entry) => {
+    const absolute = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      return walkFiles(absolute);
+    }
+    return [absolute];
+  }));
+  return files.flat();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function extractMessageTexts(value: unknown): string[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const texts: string[] = [];
+  if (typeof value.output === "string") {
+    texts.push(value.output);
+  }
+  if (Array.isArray(value.content)) {
+    for (const item of value.content) {
+      if (isRecord(item) && typeof item.text === "string") {
+        texts.push(item.text);
+      }
+    }
+  }
+  return texts;
+}
+
+async function findMatchingImplementerSessionEvidence(
+  paths: RuntimePaths,
+  featureBranch: string,
+  expectedFiles: string[],
+): Promise<RootRecoverySessionEvidence | null> {
+  const sessionsRoot = path.join(paths.ralphRoot, "codex-home", "sessions");
+  const candidateFiles = (await walkFiles(sessionsRoot))
+    .filter((absolute) => absolute.endsWith(".jsonl"))
+    .sort()
+    .reverse();
+  for (const sessionPath of candidateFiles) {
+    const raw = await fs.readFile(sessionPath, "utf8");
+    let sawImplementerPrompt = false;
+    let sawMatchingStatus = false;
+    let sawGitAction = false;
+    for (const line of raw.split(/\r?\n/)) {
+      if (line.trim() === "") {
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = isRecord(parsed) ? parsed.payload : undefined;
+      const texts = extractMessageTexts(payload);
+      for (const text of texts) {
+        if (
+          text.includes("You are the implementer agent for Ralph.")
+          && text.includes(`Required feature branch: ${featureBranch}`)
+        ) {
+          sawImplementerPrompt = true;
+        }
+        if (text.includes("git add ") || text.includes("git commit ")) {
+          sawGitAction = true;
+        }
+        if (text.includes("git status --short")) {
+          const statusEntries = extractStatusEntriesFromCommandOutput(text);
+          if (sameFileSet(statusEntriesToFiles(statusEntries), expectedFiles)) {
+            sawMatchingStatus = true;
+          }
+        }
+      }
+    }
+    if (sawImplementerPrompt && sawMatchingStatus && sawGitAction) {
+      return {
+        sessionPath,
+        matchedSignals: [
+          "matched implementer prompt",
+          "matched saved git status output",
+          "matched saved git add/commit activity",
+        ],
+      };
+    }
+  }
+  return null;
+}
+
+function recoveryExpectedFileSource(checkpoint: ResumeCheckpoint): "understanding" | "implementation" {
+  return checkpoint.implementation ? "implementation" : "understanding";
+}
+
+function buildRecoveryAuditSummary(audit: RootRecoveryAudit): string {
+  const evidence = audit.evidence;
+  if (!evidence) {
+    return audit.reasons.join(" ");
+  }
+  const sourceLabel = evidence.expectedFilesSource === "implementation"
+    ? "saved implementation changedFiles"
+    : "saved understanding targetFiles";
+  const summary = [
+    `Recovered prior run ${audit.priorRunId ?? "unknown"} on ${audit.currentBranch ?? audit.expectedBranch}.`,
+    `Dirty files exactly matched ${sourceLabel}.`,
+    "git diff --check and git diff --cached --check were clean.",
+  ];
+  if (evidence.sessionEvidence) {
+    summary.push(`Matched saved implementer session evidence at ${evidence.sessionEvidence.sessionPath}.`);
+  }
+  return summary.join(" ");
+}
+
+function buildRootRecoveryCheckpoint(checkpoint: ResumeCheckpoint): ResumeCheckpoint {
+  if (!checkpoint.understanding) {
+    throw new Error("Root recovery requires a saved understanding artifact.");
+  }
+  return {
+    stage: "implementing",
+    seedIteration: checkpoint.seedIteration,
+    startIteration: checkpoint.startIteration,
+    understanding: checkpoint.understanding,
+    acceptedFindings: checkpoint.acceptedFindings,
+    ...(checkpoint.planningViews ? { planningViews: checkpoint.planningViews } : {}),
+    ...(checkpoint.supervisorStrategy ? { supervisorStrategy: checkpoint.supervisorStrategy } : {}),
+    ...(checkpoint.invalidationReason ? { invalidationReason: checkpoint.invalidationReason } : {}),
+  };
+}
+
+async function auditDirtyRootRecovery(
+  paths: RuntimePaths,
+  spec: SpecDocument,
+  repoPath: string,
+  state: RunState,
+  checkpoint: ResumeCheckpoint | null,
+): Promise<RootRecoveryAudit> {
+  const currentBranch = await readGitStdout(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => undefined);
+  const dirtyEntries = await readGitLines(repoPath, ["status", "--short"]);
+  const dirtyFiles = statusEntriesToFiles(dirtyEntries);
+  const audit: RootRecoveryAudit = {
+    linked: false,
+    passed: false,
+    action: "reject",
+    reasons: [],
+    expectedBranch: spec.branchInstructions.createBranch,
+    ...(state.runId ? { priorRunId: state.runId } : {}),
+    ...(currentBranch ? { currentBranch } : {}),
+  };
+
+  if (dirtyEntries.length === 0) {
+    audit.reasons.push("repository is clean");
+    return audit;
+  }
+  if (currentBranch !== spec.branchInstructions.createBranch) {
+    audit.reasons.push(`current branch ${currentBranch ?? "HEAD"} does not match ${spec.branchInstructions.createBranch}`);
+    return audit;
+  }
+  if (state.checkoutMode !== "root" || state.worktreePath !== repoPath || !state.runId || state.status === "done") {
+    audit.reasons.push("saved run state does not link this dirty repo root to the same spec");
+    return audit;
+  }
+  if (!checkpoint?.understanding) {
+    audit.reasons.push("saved understanding artifact is missing");
+    return audit;
+  }
+  const eventLogPath = path.join(paths.runsRoot, spec.specId, state.runId, "events.log");
+  const eventLog = await fs.readFile(eventLogPath, "utf8").catch(() => "");
+  if (!eventLog.includes("phase=implementing") || !eventLog.includes("running implementer")) {
+    audit.reasons.push("saved events log does not show an implementer start");
+    return audit;
+  }
+
+  audit.linked = true;
+  audit.action = "stash_and_restart";
+
+  const expectedFilesSource = recoveryExpectedFileSource(checkpoint);
+  const expectedFiles = sortUnique(
+    expectedFilesSource === "implementation"
+      ? (checkpoint.implementation?.output.changedFiles ?? [])
+      : checkpoint.understanding.output.targetFiles,
+  );
+  audit.evidence = {
+    expectedFilesSource,
+    expectedFiles,
+    dirtyEntries,
+    dirtyFiles,
+  };
+
+  if (!sameFileSet(dirtyFiles, expectedFiles)) {
+    audit.reasons.push(
+      `dirty files ${dirtyFiles.join(", ") || "(none)"} did not exactly match expected files ${expectedFiles.join(", ") || "(none)"}`,
+    );
+  }
+
+  try {
+    await execFileAsync("git", ["-C", repoPath, "diff", "--check"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    audit.reasons.push(`git diff --check failed: ${message}`);
+  }
+  try {
+    await execFileAsync("git", ["-C", repoPath, "diff", "--cached", "--check"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    audit.reasons.push(`git diff --cached --check failed: ${message}`);
+  }
+
+  if (expectedFilesSource === "understanding") {
+    const sessionEvidence = await findMatchingImplementerSessionEvidence(
+      paths,
+      spec.branchInstructions.createBranch,
+      expectedFiles,
+    );
+    if (!sessionEvidence) {
+      audit.reasons.push("matching saved implementer session evidence was not found");
+    } else if (audit.evidence) {
+      audit.evidence.sessionEvidence = sessionEvidence;
+    }
+  }
+
+  if (audit.reasons.length === 0) {
+    audit.passed = true;
+    audit.action = "continue";
+  }
+  return audit;
+}
+
+async function stashDirtyRootCheckout(repoPath: string, message: string): Promise<{ message: string; stashRef?: string }> {
+  await execFileAsync("git", ["-C", repoPath, "stash", "push", "-u", "-m", message]);
+  const { stdout } = await execFileAsync("git", ["-C", repoPath, "stash", "list", "--format=%gd%x09%s", "-1"]);
+  const [firstLine] = stdout.trim().split(/\r?\n/);
+  if (!firstLine) {
+    return { message };
+  }
+  const [stashRef, stashMessage] = firstLine.split("\t");
+  return {
+    message: stashMessage ?? message,
+    ...(stashRef ? { stashRef } : {}),
+  };
+}
+
 function formatResumeCheckpointMessage(resumeCheckpoint: ResumeCheckpoint | null): string {
   if (!resumeCheckpoint) {
     return "[resume] no reusable checkpoint found — starting from scratch";
@@ -1100,14 +1399,16 @@ export async function executeSpec(
     };
   }
 
-  const resumeCheckpoint = options.resume ? await inferResumeCheckpoint(paths, spec, state) : null;
+  const inferredResumeCheckpoint = await inferResumeCheckpoint(paths, spec, state);
+  let resumeCheckpoint = options.resume ? inferredResumeCheckpoint : null;
   if (options.resume) {
     console.log(formatResumeCheckpointMessage(resumeCheckpoint));
   }
   const runId = createRunId();
   state.updatedAt = new Date().toISOString();
-  const restartFailureContext = state.invalidationReason ?? state.lastError;
-  const allowDirtyRootCheckout = checkoutMode === "root" && options.resume === true && resumeCheckpoint !== null;
+  let restartFailureContext = state.invalidationReason ?? state.lastError;
+  let allowDirtyRootCheckout = checkoutMode === "root" && options.resume === true && resumeCheckpoint !== null;
+  let pendingImplementerRecoveryContext: ImplementerRecoveryContext | undefined;
 
   if (options.dryRun) {
     const dryRunSourceOutcome = await analyzeDryRunSourceBranch(paths, spec, repoPath);
@@ -1133,15 +1434,56 @@ export async function executeSpec(
     return dryOutcome;
   }
 
+  await ensureCodexHome(paths);
+  if (checkoutMode === "root") {
+    const dirtyEntries = await readGitLines(repoPath, ["status", "--short"]);
+    if (dirtyEntries.length > 0) {
+      const recoveryIteration = inferredResumeCheckpoint?.startIteration ?? (state.currentIteration > 0 ? state.currentIteration : 1);
+      const recoveryAudit = await auditDirtyRootRecovery(paths, spec, repoPath, state, inferredResumeCheckpoint);
+      await saveArtifact(paths, spec.specId, runId, `recovery_audit-${recoveryIteration}`, recoveryAudit);
+      if (recoveryAudit.action === "continue" && inferredResumeCheckpoint) {
+        resumeCheckpoint = buildRootRecoveryCheckpoint(inferredResumeCheckpoint);
+        allowDirtyRootCheckout = true;
+        pendingImplementerRecoveryContext = {
+          auditSummary: buildRecoveryAuditSummary(recoveryAudit),
+          dirtyFiles: recoveryAudit.evidence?.dirtyFiles ?? [],
+          expectedFilesSource: recoveryAudit.evidence?.expectedFilesSource ?? "understanding",
+          ...(recoveryAudit.evidence?.sessionEvidence
+            ? { sessionEvidence: recoveryAudit.evidence.sessionEvidence }
+            : {}),
+        };
+        await emitProgress(paths, spec, runId, deps, {
+          phase: "recovery",
+          summary: "dirty root checkout audit passed; continuing from recovered same-spec state",
+        });
+      } else if (recoveryAudit.action === "stash_and_restart") {
+        const stashTimestamp = new Date().toISOString().replaceAll(":", "").replaceAll(".", "");
+        const stashMessage = `ralph root recovery ${spec.specId} ${state.runId ?? "unknown-run"} ${stashTimestamp}`;
+        const stashRecord = await stashDirtyRootCheckout(repoPath, stashMessage);
+        await saveArtifact(paths, spec.specId, runId, `recovery_stash-${recoveryIteration}`, {
+          ...stashRecord,
+          audit: recoveryAudit,
+        });
+        await emitProgress(paths, spec, runId, deps, {
+          phase: "recovery",
+          summary: "dirty root checkout audit failed; stashed changes and restarting from a clean checkout",
+        });
+        state = initialRunState(spec, legacyDone);
+        state.updatedAt = new Date().toISOString();
+        resumeCheckpoint = null;
+        allowDirtyRootCheckout = false;
+        pendingImplementerRecoveryContext = undefined;
+        restartFailureContext = undefined;
+      }
+    }
+  }
+
   // If this spec already failed once, treat the prior failure message as the
   // next run's restart context so reruns pick up from the last error rather
   // than re-planning from a blank slate.
   if (!state.invalidationReason && restartFailureContext) {
     state.invalidationReason = restartFailureContext;
-    await saveRunState(paths, state);
   }
-
-  await ensureCodexHome(paths);
   await saveRunState(paths, state);
 
   const worktreePath = checkoutMode === "root"
@@ -1171,7 +1513,7 @@ export async function executeSpec(
   let plannedReviewerRoles = [...defaultReviewerRoles];
   let shouldReplan = true;
   let verificationRun: VerificationRun | undefined;
-  const retryingFromFailure = restartFailureContext !== undefined;
+  let retryingFromFailure = restartFailureContext !== undefined;
 
   const finalizeApprovedSpec = async (
     iteration: number,
@@ -1317,6 +1659,8 @@ export async function executeSpec(
     currentUnderstanding: UnderstandingPacket,
     escalated: boolean,
   ): Promise<ImplementationReport | null> => {
+    const recoveryContext = pendingImplementerRecoveryContext;
+    pendingImplementerRecoveryContext = undefined;
     const implementationAdditionalDirectories =
       checkoutMode === "root" && commandsNeedDockerSocket(currentUnderstanding.verificationCommands)
         ? [...new Set([...additionalDirectories, "/var/run"])]
@@ -1334,7 +1678,14 @@ export async function executeSpec(
       spec,
       state,
       runId,
-      implementerOptions(options.model, worktreePath, implementationAdditionalDirectories, escalated, checkoutMode),
+      implementerOptions(
+        options.model,
+        worktreePath,
+        implementationAdditionalDirectories,
+        escalated,
+        checkoutMode,
+        recoveryContext !== undefined || escalated,
+      ),
       implementationReportOutputSchema,
       buildImplementerPrompt(
         spec,
@@ -1342,6 +1693,7 @@ export async function executeSpec(
         worktreePath,
         implementationPromptFixes(acceptedFindings),
         escalated,
+        recoveryContext,
       ),
     );
     const normalizedImplementation = await normalizeImplementationChangedFiles(
