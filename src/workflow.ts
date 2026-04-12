@@ -1047,6 +1047,8 @@ function extractMessageTexts(value: unknown): string[] {
 
 async function findMatchingImplementerSessionEvidence(
   paths: RuntimePaths,
+  repoPath: string,
+  specId: string,
   featureBranch: string,
   expectedFiles: string[],
 ): Promise<RootRecoverySessionEvidence | null> {
@@ -1057,6 +1059,8 @@ async function findMatchingImplementerSessionEvidence(
     .reverse();
   for (const sessionPath of candidateFiles) {
     const raw = await fs.readFile(sessionPath, "utf8");
+    let sawMatchingCwd = false;
+    let sawMatchingSpec = false;
     let sawImplementerPrompt = false;
     let sawMatchingStatus = false;
     let sawGitAction = false;
@@ -1071,8 +1075,14 @@ async function findMatchingImplementerSessionEvidence(
         continue;
       }
       const payload = isRecord(parsed) ? parsed.payload : undefined;
+      if (isRecord(payload) && typeof payload.cwd === "string" && path.resolve(payload.cwd) === path.resolve(repoPath)) {
+        sawMatchingCwd = true;
+      }
       const texts = extractMessageTexts(payload);
       for (const text of texts) {
+        if (text.includes(`Spec: ${specId}`)) {
+          sawMatchingSpec = true;
+        }
         if (
           text.includes("You are the implementer agent for Ralph.")
           && text.includes(`Required feature branch: ${featureBranch}`)
@@ -1090,10 +1100,12 @@ async function findMatchingImplementerSessionEvidence(
         }
       }
     }
-    if (sawImplementerPrompt && sawMatchingStatus && sawGitAction) {
+    if (sawMatchingCwd && sawMatchingSpec && sawImplementerPrompt && sawMatchingStatus && sawGitAction) {
       return {
         sessionPath,
         matchedSignals: [
+          "matched session cwd",
+          "matched prompt spec id",
           "matched implementer prompt",
           "matched saved git status output",
           "matched saved git add/commit activity",
@@ -1224,6 +1236,8 @@ async function auditDirtyRootRecovery(
   if (expectedFilesSource === "understanding") {
     const sessionEvidence = await findMatchingImplementerSessionEvidence(
       paths,
+      repoPath,
+      spec.specId,
       spec.branchInstructions.createBranch,
       expectedFiles,
     );

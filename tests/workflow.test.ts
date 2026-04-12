@@ -371,6 +371,9 @@ async function seedDirtyRootImplementingState(
     targetFiles: string[];
     branch?: string;
     commandOutput?: string;
+    sessionCwd?: string;
+    promptSpecId?: string;
+    implementationChangedFiles?: string[];
   },
 ): Promise<void> {
   const branch = options.branch ?? "feature/demo";
@@ -423,6 +426,24 @@ async function seedDirtyRootImplementingState(
     items: [],
     rawResponse: "{}",
   });
+  if (options.implementationChangedFiles) {
+    await writeArtifactJson(paths, spec.specId, runId, "implementer-1", {
+      role: "implementer",
+      turnId: `implementer:${runId}`,
+      threadId: "saved-implementer",
+      output: {
+        summary: "Saved implementation artifact for recovery.",
+        commitHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        changedFiles: options.implementationChangedFiles,
+        verificationCommands: ["git status --short"],
+        verificationSummary: "Saved recovery implementation.",
+        concerns: [],
+      },
+      usage: null,
+      items: [],
+      rawResponse: "{}",
+    });
+  }
 
   const eventLogPath = runEventLogPath(paths, spec.specId, runId);
   await fs.mkdir(path.dirname(eventLogPath), { recursive: true });
@@ -446,7 +467,7 @@ async function seedDirtyRootImplementingState(
         type: "session_meta",
         payload: {
           id: `${runId}-session`,
-          cwd: repoRoot,
+          cwd: options.sessionCwd ?? repoRoot,
         },
       },
       {
@@ -460,6 +481,7 @@ async function seedDirtyRootImplementingState(
               type: "input_text",
               text: [
                 "You are the implementer agent for Ralph.",
+                `Spec: ${options.promptSpecId ?? spec.specId}`,
                 `Required feature branch: ${branch}`,
               ].join("\n"),
             },
@@ -1438,6 +1460,233 @@ test("executeSpec root checkout mode stashes and restarts when matching session 
   );
   const { stdout: stashList } = await execFile("git", ["-C", repoRoot, "stash", "list"]);
   assert.match(stashList, /ralph root recovery 1001-demo root-recovery-missing-session/);
+});
+
+test("executeSpec root checkout mode rejects saved session evidence from the wrong repo/spec and restarts clean", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const commitHash = "ffffffffffffffffffffffffffffffffffffffff";
+  const progressEvents: WorkflowProgressEvent[] = [];
+  const otherRepoRoot = path.join(workspaceRoot, "other-repo");
+
+  await fs.mkdir(otherRepoRoot, { recursive: true });
+  await execFile("git", ["checkout", "-b", "feature/demo"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# looks matching but wrong session\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: repoRoot });
+  await seedDirtyRootImplementingState(paths, spec, repoRoot, "root-recovery-wrong-session", {
+    targetFiles: ["README.md"],
+    sessionCwd: otherRepoRoot,
+    promptSpecId: "9999-other-spec",
+  });
+
+  const fakeCodex = new FakeCodex([
+    ...defaultPlanningResponses(repoRoot, repoRoot),
+    JSON.stringify({
+      summary: "Replanned because the saved session identity did not match.",
+      reviewerRoles: [],
+      keyRisks: [],
+      notesForUnderstander: [],
+    }),
+    JSON.stringify({
+      summary: "Rebuild from the clean checkout after rejecting mismatched session evidence.",
+      repoPath: repoRoot,
+      worktreePath: repoRoot,
+      checkoutMode: "root",
+      featureBranch: "feature/demo",
+      targetFiles: ["README.md"],
+      contextFiles: ["README.md"],
+      executionPlan: ["Recreate the staged change from a clean root checkout."],
+      verificationCommands: ["git status --short"],
+      assumptions: [],
+      riskFlags: [],
+    }),
+    JSON.stringify({
+      summary: "Implemented the clean rerun after rejecting stale session evidence.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Fresh rerun implementation.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Verification is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse(),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Fresh rerun implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully after rejecting stale session evidence.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: false,
+      specFilters: [],
+      checkoutMode: "root",
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+      validateImplementationCandidate: async () => null,
+      runVerificationCommands: async () => ({
+        repoPath: repoRoot,
+        featureBranch: "feature/demo",
+        startingBranch: "feature/demo",
+        startingCommit: commitHash,
+        restoredBranch: "feature/demo",
+        commands: [
+          {
+            command: "git status --short",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          },
+        ],
+        summary: "Stubbed verification after rejecting stale session evidence.",
+        succeeded: true,
+      }),
+    }),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.deepEqual(
+    progressEvents
+      .filter((event) => event.phase === "recovery")
+      .map((event) => event.summary),
+    ["dirty root checkout audit failed; stashed changes and restarting from a clean checkout"],
+  );
+  const { stdout: stashList } = await execFile("git", ["-C", repoRoot, "stash", "list"]);
+  assert.match(stashList, /ralph root recovery 1001-demo root-recovery-wrong-session/);
+});
+
+test("executeSpec root checkout mode recovers from a saved implementation artifact without session-log matching", async () => {
+  const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
+  const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
+  const commitHash = "abababababababababababababababababababab";
+  const progressEvents: WorkflowProgressEvent[] = [];
+
+  await execFile("git", ["checkout", "-b", "feature/demo"], { cwd: repoRoot });
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# recover from implementation artifact\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: repoRoot });
+  await seedDirtyRootImplementingState(paths, spec, repoRoot, "root-recovery-implementation-artifact", {
+    targetFiles: ["WRONG.md"],
+    commandOutput: [
+      "Command: /bin/bash -lc 'git status --short --branch'",
+      "Output:",
+      "## feature/demo",
+      "M  WRONG.md",
+      "",
+    ].join("\n"),
+    implementationChangedFiles: ["README.md"],
+  });
+
+  const fakeCodex = new FakeCodex([
+    JSON.stringify({
+      summary: "Recovered the staged change from the saved implementation artifact path.",
+      commitHash,
+      changedFiles: ["README.md"],
+      verificationCommands: ["git status --short"],
+      verificationSummary: "Recovered root-mode implementation from implementation artifact.",
+      concerns: [],
+    }),
+    JSON.stringify({
+      reviewer: "correctness",
+      status: "approved",
+      summary: "No correctness issues.",
+      findings: [],
+    }),
+    JSON.stringify({
+      reviewer: "tests",
+      status: "approved",
+      summary: "Recovery verification is sufficient.",
+      findings: [],
+    }),
+    reviewLeadReadyResponse("Recovery review is ready."),
+    JSON.stringify({
+      verdict: "approve",
+      summary: "Recovered implementation matches the spec.",
+      acceptedFindings: [],
+      rejectedFindings: [],
+      fixInstructions: [],
+    }),
+    JSON.stringify({
+      status: "done",
+      summary: "Spec completed successfully after implementation-artifact recovery.",
+      candidateCommit: commitHash,
+      nextAction: "none",
+    }),
+  ]);
+
+  const outcome = await executeSpec(
+    paths,
+    {
+      workspaceRoot,
+      projectRoot,
+      model: undefined,
+      maxIterations: 2,
+      dryRun: false,
+      specFilters: [],
+      checkoutMode: "root",
+    },
+    spec,
+    fakeWorkflowDeps(fakeCodex, {
+      onProgress: (event) => {
+        progressEvents.push(event);
+      },
+      validateImplementationCandidate: async () => null,
+      runVerificationCommands: async () => ({
+        repoPath: repoRoot,
+        featureBranch: "feature/demo",
+        startingBranch: "feature/demo",
+        startingCommit: commitHash,
+        restoredBranch: "feature/demo",
+        commands: [
+          {
+            command: "git status --short",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          },
+        ],
+        summary: "Stubbed recovery verification from implementation artifact.",
+        succeeded: true,
+      }),
+    }),
+  );
+
+  assert.equal(outcome.status, "done");
+  assert.ok(fakeCodex.prompts[0]?.prompt.includes("Recovered expected-file source: implementation"));
+  assert.deepEqual(
+    progressEvents
+      .filter((event) => event.phase === "recovery")
+      .map((event) => event.summary),
+    ["dirty root checkout audit passed; continuing from recovered same-spec state"],
+  );
 });
 
 test("executeSpec normalizes implementer changedFiles to branch-wide diff before validation", async () => {
