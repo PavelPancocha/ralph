@@ -143,8 +143,8 @@ const supervisorOutcomeSchema = z.object({
 
 const defaultReviewerRoles: ReviewerReport["reviewer"][] = ["correctness", "tests"];
 const planningHelperRoles = ["planning_spec", "planning_repo", "planning_risks"] as const;
-const defaultPrimaryModel = "gpt-5.4";
-const defaultHelperModel = "gpt-5.4-mini";
+const defaultPrimaryModel = "gpt-5.5";
+const defaultHelperModel = "gpt-5.5";
 interface StructuredOutputSchema<T> {
   zod: z.ZodTypeAny;
   json: Record<string, unknown>;
@@ -413,7 +413,7 @@ function planningHelperOptions(
     checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
-    reasoningEffort: escalated ? "xhigh" : role === "planning_risks" ? "high" : "medium",
+    reasoningEffort: escalated ? "high" : role === "planning_risks" ? "medium" : "low",
   };
 }
 
@@ -431,7 +431,7 @@ function supervisorOptions(
     checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
-    reasoningEffort: "xhigh",
+    reasoningEffort: "high",
   };
 }
 
@@ -449,7 +449,7 @@ function understanderOptions(
     checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
-    reasoningEffort: "xhigh",
+    reasoningEffort: "high",
   };
 }
 
@@ -470,7 +470,7 @@ function implementerOptions(
     forceFreshThread,
     sandboxMode: "workspace-write",
     approvalPolicy: "never",
-    reasoningEffort: escalated ? "xhigh" : "high",
+    reasoningEffort: escalated ? "high" : "medium",
   };
 }
 
@@ -497,7 +497,7 @@ function reviewerRoleOptions(
     forceFreshThread: escalated,
     sandboxMode: "read-only",
     approvalPolicy: "never",
-    reasoningEffort: escalated ? "xhigh" : "high",
+    reasoningEffort: escalated ? "high" : "medium",
   };
 }
 
@@ -515,7 +515,7 @@ function reviewLeadOptions(
     checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
-    reasoningEffort: "xhigh",
+    reasoningEffort: "high",
   };
 }
 
@@ -533,7 +533,7 @@ function recheckOptions(
     checkoutMode,
     sandboxMode: "read-only",
     approvalPolicy: "never",
-    reasoningEffort: "xhigh",
+    reasoningEffort: "high",
   };
 }
 

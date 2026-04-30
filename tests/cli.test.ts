@@ -389,6 +389,9 @@ test("create-spec scaffolds a spec with required and recommended sections", asyn
   assert.match(created, /^## Scope \(In\)$/m);
   assert.match(created, /^## Boundaries \(Out, No Overlap\)$/m);
   assert.match(created, /^## Commit Requirements$/m);
+  assert.match(created, /GPT-5\.5 spec style: describe the desired outcome, constraints, evidence, and validation/);
+  assert.match(created, /Observable behavior or artifact that proves the outcome is satisfied/);
+  assert.match(created, /List targeted commands in the order Ralph should trust first/);
 });
 
 test("create-spec respects a custom spec root resolved from the Ralph project root", async () => {
