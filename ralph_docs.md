@@ -56,7 +56,7 @@ If recheck returns `needs_fix`, the loop continues until `maxIterations` is reac
 If recheck returns `invalidate_plan`, Ralph clears planning-helper, supervisor, understander, implementer, reviewer, review-lead, and recheck thread references and starts a fresh stronger planning pass inside the same spec run.
 
 If a spec is rerun after a prior failure, Ralph reuses the stored `lastError` as the restart context so the next planning pass starts from the last known problem instead of a blank slate.
-That retry also escalates the first implementation and review pass to the stronger model tier so the rerun does not fall back to the cheap initial policy.
+That retry also escalates the first implementation and review pass to the stronger reasoning policy so the rerun does not fall back to the lower-effort initial policy.
 
 Before execution, Ralph skips any specs that are already done and logs them explicitly.
 
@@ -68,20 +68,21 @@ In `--checkout-mode root`, Ralph also runs a recovery audit on ordinary reruns w
 
 Without `--model`, Ralph uses a role-aware default policy:
 
-- `gpt-5.4-mini`
+- `gpt-5.5` with `low` reasoning
   - `planning_spec`
   - `planning_repo`
+- `gpt-5.5` with `medium` reasoning
   - `planning_risks`
   - first-pass `implementer`
   - first-pass topic reviewers
-- `gpt-5.4` with `xhigh`
+- `gpt-5.5` with `high` reasoning
   - `supervisor`
   - `understander`
   - `review_lead`
   - `recheck`
   - final `supervisor`
 
-If the first implementation or first-pass review is not accepted, Ralph escalates the next implementation attempt or targeted re-review to the stronger policy.
+If the first implementation or first-pass review is not accepted, Ralph escalates the next implementation attempt or targeted re-review to the `high` reasoning policy. The default "cheap" path is lower reasoning effort on GPT-5.5, not an older or smaller model.
 
 ## Source Layout
 
@@ -259,6 +260,8 @@ The current parser recognizes:
 The `Source branch` and `Create branch` fields are required.
 
 For a runnable spec, `Repo:`, `Workdir:`, and non-empty `Source branch` / `Create branch` values are the hard parser requirements. The remaining sections are parsed when present and scaffolded by `create-spec` because they produce better execution packets and reviews.
+
+GPT-5.5-friendly specs should be outcome-first: describe the end state, observable acceptance criteria, constraints, required evidence, and fast validation commands. Avoid step-by-step implementation instructions unless the exact implementation path is part of the contract.
 
 Publication defaults:
 
@@ -483,7 +486,7 @@ npm run dev -- create-spec --spec-root ../zemtu/docs/plans/payment-toolbox/specs
 This command creates a new markdown file under the selected spec root and prepopulates it with:
 
 - required sections the parser/runtime currently depend on
-- recommended sections that help produce better execution packets and reviews
+- recommended outcome, boundary, evidence, and validation sections that help GPT-5.5 produce better execution packets and reviews
 - placeholder branch instructions and verification blocks
 
 ### Mark a spec done manually

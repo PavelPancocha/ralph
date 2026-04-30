@@ -31,7 +31,7 @@ npm run dev -- --to 1003
 npm run dev -- --workspace-root /path/to/workspace
 
 # Override model for all roles
-npm run dev -- --model gpt-5.4
+npm run dev -- --model gpt-5.5
 
 # List run states
 ralph status

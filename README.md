@@ -119,7 +119,7 @@ npm run dev -- --spec-root ../zemtu/docs/plans/payment-toolbox/specs
 npm run dev -- 2003-stop-runtime-effective-date-usage --checkout-mode root
 
 # Override all Ralph-managed roles to one model
-npm run dev -- --model gpt-5.4
+npm run dev -- --model gpt-5.5
 
 # Limit internal review/fix iterations
 npm run dev -- --max-iterations 3
@@ -205,7 +205,7 @@ Ralph skips specs that are already done before execution and logs them explicitl
 Ralph also stops on the first failed spec instead of continuing, because the backlog is typically dependency-ordered and later specs usually depend on earlier ones succeeding.
 `--to <spec>` runs sequentially through the ordered backlog up to the matching target spec and starts from the first spec in that bounded range that is not already done.
 `mark-done <spec>` marks one resolved spec as done manually, clears any persisted failure/invalidation state for that spec, and writes a manual done report so later runs skip it cleanly.
-If a spec in that rerun range has already failed once, Ralph seeds the next attempt from the stored `lastError` so the rerun starts from the prior failure context instead of a blank planning pass. The first implementation and review pass on that retry use the stronger model tier instead of the cheap first-pass tier.
+If a spec in that rerun range has already failed once, Ralph seeds the next attempt from the stored `lastError` so the rerun starts from the prior failure context instead of a blank planning pass. The first implementation and review pass on that retry use the stronger reasoning policy instead of the lower-effort first-pass policy.
 
 `--resume` continues a previously started spec run from the latest feasible checkpoint instead of replaying the whole workflow from scratch. Ralph prefers the most advanced saved stage it can reconstruct from the run state and artifacts, restores the saved planning context when it is available, and then continues from there with the existing thread history when the saved policy still matches. The durable checkpoint pointer is only advanced after a new structured artifact is written, so an early setup failure does not make Ralph forget the last resumable run. It also prints a small checkpoint banner so you can see whether it resumed from planning, reviewing, rechecking, or had to fall back to a fresh run. In `--checkout-mode root`, dirty same-spec reruns now go through a recovery audit before setup: if the live dirty tree matches the interrupted run evidence Ralph auto-continues, otherwise it stashes the linked dirty tree and restarts clean.
 
@@ -217,9 +217,12 @@ When Ralph creates or reuses a real spec worktree, it prunes stale git worktree 
 
 Without `--model`, Ralph uses a smart role policy by default:
 
-- `gpt-5.4-mini` for planning helpers, first-pass implementation, and first-pass topic reviews
-- `gpt-5.4` with `xhigh` reasoning for supervisor, understander, review lead, recheck, and final closeout
-- implementation and targeted review escalation move from the cheaper first pass to the stronger policy only after rejection or invalidation
+- `gpt-5.5` for all Ralph-managed roles
+- `low` reasoning for lightweight spec/repo planning helpers
+- `medium` reasoning for risk planning, first-pass implementation, and first-pass topic reviews
+- `high` reasoning for supervisor, understander, review lead, recheck, final closeout, and retry/escalation passes
+
+The "cheap" path is now a lower reasoning-effort path on GPT-5.5, not an older or smaller model. Use `--model <model>` only when you want to force every Ralph-managed role to a specific model while keeping the role-specific reasoning policy.
 
 ### PR Publication Defaults
 
@@ -305,7 +308,15 @@ It also understands and preserves these sections when present:
 - `## Boundaries (Out, No Overlap)` or `## Boundaries (Out)`
 - `## Commit Requirements`
 
-The scaffolded template includes the fuller recommended spec shape, with placeholders you should fill in before running a real spec.
+The scaffolded template includes the fuller recommended spec shape, with GPT-5.5-friendly placeholders you should fill in before running a real spec.
+
+For best results with GPT-5.5, write specs outcome-first:
+
+- describe the desired end state and observable success criteria
+- name constraints, boundaries, and compatibility expectations explicitly
+- point `Required Reading` at concrete files, docs, issues, specs, or PRs
+- put targeted validation commands in `Verification (Fast-First)` in trust order
+- avoid step-by-step implementation instructions unless the exact path is required
 
 The `run` command only selects runnable specs. Draft or analysis markdown files that happen to match the filename pattern are ignored until they provide that minimum runnable contract.
 
@@ -323,16 +334,16 @@ Workdir: demo-repo
 - PR target: `dev`
 
 ## Goal
-Make a small, safe change.
+Add the demo marker to the README so the project advertises the sample workflow.
 
 ## Scope (In)
-- Touch one file.
+- Update `README.md`.
 
 ## Boundaries (Out, No Overlap)
-- No unrelated refactors.
+- Do not change runtime code or package metadata.
 
 ## Constraints
-- Keep it minimal.
+- Follow the existing README style.
 
 ## Dependencies
 - None.
@@ -341,7 +352,8 @@ Make a small, safe change.
 - `README.md`
 
 ## Acceptance Criteria
-- Runner completes the loop.
+- `README.md` contains the demo marker.
+- Existing Ralph behavior is unchanged.
 
 ## Commit Requirements
 - Use the requested branch.

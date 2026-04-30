@@ -748,17 +748,17 @@ test("executeSpec completes the supervised loop with an injected Codex backend",
   assert.deepEqual(
     fakeCodex.threadConfigs.map((entry) => [entry.method, entry.options?.model, entry.options?.modelReasoningEffort]),
     [
-      ["start", "gpt-5.4-mini", "medium"],
-      ["start", "gpt-5.4-mini", "medium"],
-      ["start", "gpt-5.4-mini", "high"],
-      ["start", "gpt-5.4", "xhigh"],
-      ["start", "gpt-5.4", "xhigh"],
-      ["start", "gpt-5.4-mini", "high"],
-      ["start", "gpt-5.4-mini", "high"],
-      ["start", "gpt-5.4-mini", "high"],
-      ["start", "gpt-5.4", "xhigh"],
-      ["start", "gpt-5.4", "xhigh"],
-      ["resume", "gpt-5.4", "xhigh"],
+      ["start", "gpt-5.5", "low"],
+      ["start", "gpt-5.5", "low"],
+      ["start", "gpt-5.5", "medium"],
+      ["start", "gpt-5.5", "high"],
+      ["start", "gpt-5.5", "high"],
+      ["start", "gpt-5.5", "medium"],
+      ["start", "gpt-5.5", "medium"],
+      ["start", "gpt-5.5", "medium"],
+      ["start", "gpt-5.5", "high"],
+      ["start", "gpt-5.5", "high"],
+      ["resume", "gpt-5.5", "high"],
     ],
   );
 
@@ -1812,7 +1812,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
 
   const supervisorPolicy = JSON.stringify({
     role: "supervisor",
-    model: "gpt-5.4",
+    model: "gpt-5.5",
     checkoutMode: "worktree",
     workingDirectory: path.resolve(expectedWorktreePath),
     additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
@@ -1820,7 +1820,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
       .sort(),
     sandboxMode: "read-only",
     approvalPolicy: "never",
-    reasoningEffort: "xhigh",
+    reasoningEffort: "high",
   });
 
   await fs.writeFile(
@@ -1844,7 +1844,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
       threadPolicies: {
         understander: JSON.stringify({
           role: "understander",
-          model: "gpt-5.4",
+          model: "gpt-5.5",
           checkoutMode: "worktree",
           workingDirectory: path.resolve(expectedWorktreePath),
           additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
@@ -1852,11 +1852,11 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
             .sort(),
           sandboxMode: "read-only",
           approvalPolicy: "never",
-          reasoningEffort: "xhigh",
+          reasoningEffort: "high",
         }),
         implementer: JSON.stringify({
           role: "implementer",
-          model: "gpt-5.4-mini",
+          model: "gpt-5.5",
           checkoutMode: "worktree",
           workingDirectory: path.resolve(expectedWorktreePath),
           additionalDirectories: [path.join(repoRoot, ".git"), path.join(repoRoot, ".git", "worktrees", spec.specId)]
@@ -1864,7 +1864,7 @@ test("executeSpec --resume continues from the latest review checkpoint", async (
             .sort(),
           sandboxMode: "workspace-write",
           approvalPolicy: "never",
-          reasoningEffort: "high",
+          reasoningEffort: "medium",
         }),
         supervisor: supervisorPolicy,
       },
@@ -2373,7 +2373,7 @@ test("executeSpec always includes correctness and tests reviewers when the super
   assert.ok(state.threads.reviewLead);
 });
 
-test("executeSpec reruns only targeted reviewers at stronger policy when the review lead asks for follow-up", async () => {
+test("executeSpec reruns only targeted reviewers at higher reasoning policy when the review lead asks for follow-up", async () => {
   const { projectRoot, workspaceRoot, repoRoot, paths } = await createTempProject();
   const spec = await parseSpecFile(projectRoot, workspaceRoot, "1001-demo.md");
   const expectedWorktreePath = path.join(paths.worktreesRoot, spec.specId);
@@ -2487,15 +2487,14 @@ test("executeSpec reruns only targeted reviewers at stronger policy when the rev
   const securityConfigs = fakeCodex.threadConfigs.filter((entry) =>
     entry.options?.workingDirectory === expectedWorktreePath
       && (entry.options?.sandboxMode === "read-only")
-      && (entry.options?.modelReasoningEffort === "high" || entry.options?.modelReasoningEffort === "xhigh")
-      && entry.options?.model?.includes("gpt-5.4")
+      && entry.options?.model?.includes("gpt-5.5")
       && fakeCodex.prompts.some((prompt) => prompt.threadId === entry.threadId && prompt.prompt.includes("security reviewer")),
   );
   assert.deepEqual(
     securityConfigs.map((entry) => [entry.method, entry.options?.model, entry.options?.modelReasoningEffort]),
     [
-      ["start", "gpt-5.4-mini", "high"],
-      ["start", "gpt-5.4", "xhigh"],
+      ["start", "gpt-5.5", "medium"],
+      ["start", "gpt-5.5", "high"],
     ],
   );
 
@@ -2752,12 +2751,11 @@ test("executeSpec carries accepted findings into the next implementer turn on ne
   assert.deepEqual(
     fakeCodex.threadConfigs
       .filter((entry) => entry.options?.workingDirectory === expectedWorktreePath)
-      .filter((entry) => entry.options?.modelReasoningEffort === "high" || entry.options?.modelReasoningEffort === "xhigh")
       .filter((entry) => entry.options?.sandboxMode === "workspace-write")
       .map((entry) => [entry.method, entry.options?.model, entry.options?.modelReasoningEffort]),
     [
+      ["start", "gpt-5.3-codex", "medium"],
       ["start", "gpt-5.3-codex", "high"],
-      ["start", "gpt-5.3-codex", "xhigh"],
     ],
   );
 });
@@ -3543,13 +3541,13 @@ test("executeSpec resumes a persisted thread when the saved policy matches", asy
   ];
   const planningSpecPolicy = JSON.stringify({
     role: "planning_spec",
-    model: "gpt-5.4-mini",
+    model: "gpt-5.5",
     checkoutMode: "worktree",
     workingDirectory: path.resolve(expectedWorktreePath),
     additionalDirectories: additionalDirectories.map((dir) => path.resolve(dir)).sort(),
     sandboxMode: "read-only",
     approvalPolicy: "never",
-    reasoningEffort: "medium",
+    reasoningEffort: "low",
   });
 
   await fs.writeFile(
@@ -3895,9 +3893,9 @@ test("executeSpec loads persisted invalidation reason and replans at escalated p
   assert.deepEqual(
     fakeCodex.threadConfigs.slice(0, 3).map((entry) => [entry.options?.model, entry.options?.modelReasoningEffort]),
     [
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
     ],
   );
   const planningPrompts = fakeCodex.prompts.slice(0, 3).map((entry) => entry.prompt);
@@ -4100,14 +4098,14 @@ test("executeSpec seeds reruns from the previous lastError and escalates the fir
   assert.deepEqual(
     fakeCodex.threadConfigs.slice(0, 8).map((entry) => [entry.options?.model, entry.options?.modelReasoningEffort]),
     [
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
-      ["gpt-5.4", "xhigh"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
+      ["gpt-5.5", "high"],
     ],
   );
   const planningPrompts = fakeCodex.prompts.slice(0, 3).map((entry) => entry.prompt);
